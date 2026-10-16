@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="Layer_1" data-name="Layer 1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 724 724">
+  <defs>
+    <style>
+      .cls-1 {
+        fill: none;
+        stroke: #231f20;
+        stroke-width: 4px;
+      }
+
+      .cls-1, .cls-2 {
+        stroke-miterlimit: 10;
+      }
+
+      .cls-2 {
+        fill: #fff;
+        stroke: #6d6e71;
+        stroke-width: 2px;
+      }
+    </style>
+  </defs>
+  <g>
+    <rect class="cls-2" x="2" y="242" width="80" height="80"/>
+    <rect class="cls-2" x="82" y="242" width="80" height="80"/>
+    <rect class="cls-2" x="162" y="242" width="80" height="80"/>
+    <rect class="cls-2" x="2" y="322" width="80" height="80"/>
+    <rect class="cls-2" x="82" y="322" width="80" height="80"/>
+    <rect class="cls-2" x="162" y="322" width="80" height="80"/>
+    <rect class="cls-2" x="2" y="402" width="80" height="80"/>
+    <rect class="cls-2" x="82" y="402" width="80" height="80"/>
+    <rect class="cls-2" x="162" y="402" width="80" height="80"/>
+  </g>
+  <g>
+    <rect class="cls-2" x="482" y="242" width="80" height="80"/>
+    <rect class="cls-2" x="562" y="242" width="80" height="80"/>
+    <rect class="cls-2" x="642" y="242" width="80" height="80"/>
+    <rect class="cls-2" x="482" y="322" width="80" height="80"/>
+    <rect class="cls-2" x="562" y="322" width="80" height="80"/>
+    <rect class="cls-2" x="642" y="322" width="80" height="80"/>
+    <rect class="cls-2" x="482" y="402" width="80" height="80"/>
+    <rect class="cls-2" x="562" y="402" width="80" height="80"/>
+    <rect class="cls-2" x="642" y="402" width="80" height="80"/>
+  </g>
+  <g>
+    <rect class="cls-2" x="2" y="482" width="80" height="80"/>
+    <rect class="cls-2" x="82" y="482" width="80" height="80"/>
+    <rect class="cls-2" x="162" y="482" width="80" height="80"/>
+    <rect class="cls-2" x="2" y="562" width="80" height="80"/>
+    <rect class="cls-2" x="82" y="562" width="80" height="80"/>
+    <rect class="cls-2" x="162" y="562" width="80" height="80"/>
+    <rect class="cls-2" x="2" y="642" width="80" height="80"/>
+    <rect class="cls-2" x="82" y="642" width="80" height="80"/>
+    <rect class="cls-2" x="162" y="642" width="80" height="80"/>
+  </g>
+  <g>
+    <rect class="cls-2" x="242" y="482" width="80" height="80"/>
+    <rect class="cls-2" x="322" y="482" width="80" height="80"/>
+    <rect class="cls-2" x="402" y="482" width="80" height="80"/>
+    <rect class="cls-2" x="242" y="562" width="80" height="80"/>
+    <rect class="cls-2" x="322" y="562" width="80" height="80"/>
+    <rect class="cls-2" x="402" y="562" width="80" height="80"/>
+    <rect class="cls-2" x="242" y="642" width="80" height="80"/>
+    <rect class="cls-2" x="322" y="642" width="80" height="80"/>
+    <rect class="cls-2" x="402" y="642" width="80" height="80"/>
+  </g>
+  <g>
+    <rect class="cls-2" x="482" y="482" width="80" height="80"/>
+    <rect class="cls-2" x="562" y="482" width="80" height="80"/>
+    <rect class="cls-2" x="642" y="482" width="80" height="80"/>
+    <rect class="cls-2" x="482" y="562" width="80" height="80"/>
+    <rect class="cls-2" x="562" y="562" width="80" height="80"/>
+    <rect class="cls-2" x="642" y="562" width="80" height="80"/>
+    <rect class="cls-2" x="482" y="642" width="80" height="80"/>
+    <rect class="cls-2" x="562" y="642" width="80" height="80"/>
+    <rect class="cls-2" x="642" y="642" width="80" height="80"/>
+  </g>
+  <g>
+    <rect class="cls-2" x="2" y="2" width="80" height="80"/>
+    <rect class="cls-2" x="82" y="2" width="80" height="80"/>
+    <rect class="cls-2" x="162" y="2" width="80" height="80"/>
+    <rect class="cls-2" x="2" y="82" width="80" height="80"/>
+    <rect class="cls-2" x="82" y="82" width="80" height="80"/>
+    <rect class="cls-2" x="162" y="82" width="80" height="80"/>
+    <rect class="cls-2" x="2" y="162" width="80" height="80"/>
+    <rect class="cls-2" x="82" y="162" width="80" height="80"/>
+    <rect class="cls-2" x="162" y="162" width="80" height="80"/>
+  </g>
+  <g>
+    <rect class="cls-2" x="242" y="2" width="80" height="80"/>
+    <rect class="cls-2" x="322" y="2" width="80" height="80"/>
+    <rect class="cls-2" x="402" y="2" width="80" height="80"/>
+    <rect class="cls-2" x="242" y="82" width="80" height="80"/>
+    <rect class="cls-2" x="322" y="82" width="80" height="80"/>
+    <rect class="cls-2" x="402" y="82" width="80" height="80"/>
+    <rect class="cls-2" x="242" y="162" width="80" height="80"/>
+    <rect class="cls-2" x="322" y="162" width="80" height="80"/>
+    <rect class="cls-2" x="402" y="162" width="80" height="80"/>
+  </g>
+  <g>
+    <rect class="cls-2" x="482" y="2" width="80" height="80"/>
+    <rect class="cls-2" x="562" y="2" width="80" height="80"/>
+    <rect class="cls-2" x="642" y="2" width="80" height="80"/>
+    <rect class="cls-2" x="482" y="82" width="80" height="80"/>
+    <rect class="cls-2" x="562" y="82" width="80" height="80"/>
+    <rect class="cls-2" x="642" y="82" width="80" height="80"/>
+    <rect class="cls-2" x="482" y="162" width="80" height="80"/>
+    <rect class="cls-2" x="562" y="162" width="80" height="80"/>
+    <rect class="cls-2" x="642" y="162" width="80" height="80"/>
+  </g>
+  <g>
+    <rect class="cls-2" x="242" y="242" width="80" height="80"/>
+    <rect class="cls-2" x="322" y="242" width="80" height="80"/>
+    <rect class="cls-2" x="402" y="242" width="80" height="80"/>
+    <rect class="cls-2" x="242" y="322" width="80" height="80"/>
+    <rect class="cls-2" x="322" y="322" width="80" height="80"/>
+    <rect class="cls-2" x="402" y="322" width="80" height="80"/>
+    <rect class="cls-2" x="242" y="402" width="80" height="80"/>
+    <rect class="cls-2" x="322" y="402" width="80" height="80"/>
+    <rect class="cls-2" x="402" y="402" width="80" height="80"/>
+  </g>
+  <rect class="cls-1" x="2" y="2" width="240" height="240"/>
+  <rect class="cls-1" x="242" y="2" width="240" height="240"/>
+  <rect class="cls-1" x="482" y="2" width="240" height="240"/>
+  <rect class="cls-1" x="2" y="242" width="240" height="240"/>
+  <rect class="cls-1" x="242" y="242" width="240" height="240"/>
+  <rect class="cls-1" x="482" y="242" width="240" height="240"/>
+  <rect class="cls-1" x="2" y="482" width="240" height="240"/>
+  <rect class="cls-1" x="242" y="482" width="240" height="240"/>
+  <rect class="cls-1" x="482" y="482" width="240" height="240"/>
+</svg>

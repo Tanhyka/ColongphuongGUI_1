@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Dict, List
 
 from PyQt6.QtCore import Qt, QSettings, QProcess
@@ -29,6 +30,7 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QMessageBox,
     QLineEdit,
@@ -83,7 +85,16 @@ class EngineEditDialog(QDialog):
         self.setWindowTitle('Engine');self.setMinimumWidth(520)
         self.old=engine or {};self.verified=None;self.accept_after_probe=False
         form=QFormLayout(self)
-        self.name_edit=QLineEdit(self.old.get('engine_name',self.old.get('name','')));self.name_edit.setReadOnly(True)
+        initial_name = self.old.get('name', self.old.get('engine_name', ''))
+        if initial_name in ('', 'Homei') or initial_name.startswith('Homei ['):
+            old_path = self.old.get('path', '')
+            if old_path and Path(old_path).is_file():
+                stem = Path(old_path).stem
+                if stem.lower() != 'homei':
+                    initial_name = stem
+        self.name_edit = QLineEdit(initial_name)
+        self.name_edit.setReadOnly(False)
+        self.name_edit.setPlaceholderText('Engine display name (e.g. Homei_v1-1)')
         self.author_edit=QLineEdit(self.old.get('author',''));self.author_edit.setReadOnly(True)
         self.path_edit=QLineEdit(self.old.get('path',''))
         self.args_edit=QLineEdit(__import__('subprocess').list2cmdline(self.old.get('args',[])))
@@ -95,34 +106,119 @@ class EngineEditDialog(QDialog):
         self.verify_button=QPushButton('Verify');self.verify_button.clicked.connect(self._probe);form.addRow(self.verify_button)
         form.addRow(_dialog_buttons(self))
         self.client=Client(self);self.client.metadataReady.connect(self._verified);self.client.errorOccurred.connect(self._error)
-        self.path_edit.textChanged.connect(self._invalidate);self.args_edit.textChanged.connect(self._invalidate)
+        self.path_edit.textChanged.connect(self._on_path_changed);self.args_edit.textChanged.connect(self._invalidate)
+
+        # Pre-populate if editing an existing engine
+        if self.old and self.old.get('path'):
+            opt_defs = self.old.get('option_definitions', {}) or self.old.get('options', {})
+            curr_opts = self.old.get('configured_options', {}) or self.old.get('options', {})
+            if isinstance(opt_defs, dict):
+                self._populate_options(opt_defs, curr_opts)
+            self.verified = {
+                'name': initial_name or self.old.get('name', ''),
+                'engine_name': initial_name or self.old.get('engine_name', ''),
+                'author': self.old.get('author', ''),
+                'version': self.old.get('version', '1.0'),
+                'kind': self.old.get('kind', 'CLP-EP v1'),
+                'protocol': self.old.get('protocol', 'clp-ep/1'),
+                'capabilities': self.old.get('capabilities', {}),
+                'options': opt_defs if isinstance(opt_defs, dict) else {},
+            }
+            self.verified_path = self.path_edit.text().strip()
+            self.verified_args = split_arguments(self.args_edit.text())
+            self.metadata_label.setText(f"Version {self.old.get('version', '1.0')} · {self.old.get('kind', 'CLP-EP v1')}")
+
+    def _populate_options(self, definitions, current_values=None):
+        while self.options_form.rowCount():
+            self.options_form.removeRow(0)
+        self.option_widgets = {}
+        curr = current_values or {}
+        for name, definition in definitions.items():
+            if isinstance(definition, dict) and definition.get('type') == 'spin':
+                spin = QSpinBox()
+                spin.setRange(int(definition.get('min', 1)), int(definition.get('max', 50000000)))
+                val = curr.get(name, definition.get('default', spin.minimum()))
+                spin.setValue(int(val))
+                self.options_form.addRow(name, spin)
+                self.option_widgets[name] = spin
+            elif isinstance(definition, int):
+                spin = QSpinBox()
+                spin.setRange(1, 50000000)
+                spin.setValue(int(curr.get(name, definition)))
+                self.options_form.addRow(name, spin)
+                self.option_widgets[name] = spin
+
+    def _on_path_changed(self):
+        self._invalidate()
+        p = self.path_edit.text().strip()
+        if p and (not self.name_edit.text().strip() or not self.old):
+            try:
+                stem = Path(p).stem
+                if stem:
+                    self.name_edit.setText(stem)
+            except Exception:
+                pass
+
     def _invalidate(self):
         self.verified=None;self.accept_after_probe=False;self.client.close();self.verify_button.setEnabled(True);self.metadata_label.setText('Verification required.')
+
     def _browse(self):
-        path,_=QFileDialog.getOpenFileName(self,'Select engine executable','','Executable files (*.exe);;All files (*.*)')
-        if path:self.path_edit.setText(path)
+        start_dir = self.path_edit.text()
+        if not start_dir or not Path(start_dir).exists():
+            for d in [
+                Path(r"E:\code5\Homei\HomeiEngine\build\Engine realese"),
+                Path(r"E:\code5\Homei\HomeiEngine\build\Engine release"),
+                Path(r"D:\code5\Homei\HomeiEngine\build\Engine realese"),
+                Path(r"D:\code5\Homei\HomeiEngine\build\Engine release"),
+            ]:
+                if d.is_dir():
+                    start_dir = str(d); break
+        path,_=QFileDialog.getOpenFileName(self,'Select engine executable',start_dir,'Executable files (*.exe);;All files (*.*)')
+        if path:
+            self.path_edit.setText(path)
+            stem = Path(path).stem
+            if stem:
+                self.name_edit.setText(stem)
+
     def _probe(self):
         self.verify_button.setEnabled(False);self.metadata_label.setText('Checking CLP-EP v1 handshake...')
         try:self.client.probe(self.path_edit.text().strip(),split_arguments(self.args_edit.text()))
         except Exception as exc:self._error(str(exc))
+
     def _verified(self,metadata):
         self.verified=metadata;self.verified_path=self.path_edit.text().strip();self.verified_args=split_arguments(self.args_edit.text())
-        self.name_edit.setText(metadata['name']);self.author_edit.setText(metadata['author']);self.verify_button.setEnabled(True)
-        playable=metadata['capabilities'].get('search')==['legal'] and metadata['capabilities'].get('position')==['rules']
+        cur_name = self.name_edit.text().strip()
+        stem = Path(self.verified_path).stem if self.verified_path else ""
+        if not cur_name or cur_name.lower() in ('homei', 'unknown', 'engine'):
+            chosen_name = stem or metadata.get('name') or 'Engine'
+            self.name_edit.setText(chosen_name)
+        self.author_edit.setText(metadata['author']);self.verify_button.setEnabled(True)
+        playable=registry.playable({**metadata, 'path': self.verified_path})
         self.metadata_label.setText(f"Version {metadata['version']} · {metadata['kind']} · {'Playable' if playable else 'Not playable'}\nCapabilities: {metadata['capabilities']}")
-        while self.options_form.rowCount():self.options_form.removeRow(0)
-        self.option_widgets={}
-        for name,definition in metadata.get('options',{}).items():
-            spin=QSpinBox();spin.setRange(definition['min'],definition['max']);spin.setValue(self.old.get('options',{}).get(name,definition['default']));self.options_form.addRow(name,spin);self.option_widgets[name]=spin
+        self._populate_options(metadata.get('options', {}), self.old.get('configured_options', self.old.get('options', {})))
         if self.accept_after_probe:self.accept()
+
     def _error(self,message):
         self.verified=None;self.accept_after_probe=False;self.verify_button.setEnabled(True);self.metadata_label.setText(str(message))
+
     def engine_data(self):
         if self.verified is None:raise ValueError('Executable has not passed handshake probe')
-        return {**self.verified,'path':self.verified_path,'args':self.verified_args,'configured_options':{n:w.value() for n,w in self.option_widgets.items()}}
+        user_name = self.name_edit.text().strip()
+        stem = Path(self.verified_path).stem if self.verified_path else ""
+        final_name = user_name or stem or self.verified.get('name', 'Engine')
+        return {
+            **self.verified,
+            'name': final_name,
+            'engine_name': final_name,
+            'path': self.verified_path,
+            'args': self.verified_args,
+            'configured_options': {n: w.value() for n, w in self.option_widgets.items()}
+        }
+
     def accept(self):
         if self.verified is None:self.accept_after_probe=True;self._probe();return
         self.client.close();super().accept()
+
     def reject(self):self.client.close();super().reject()
     def closeEvent(self,event):self.client.close();super().closeEvent(event)
 
@@ -181,6 +277,7 @@ class EngineListDialog(QDialog):
         bottom = QHBoxLayout()
         self.btn_add = QPushButton("Add")
         self.btn_set = QPushButton("Set")
+        self.btn_rename = QPushButton("Rename")
         self.btn_delete = QPushButton("Delete")
         self.window_check = QCheckBox("window")
         self.window_check.setChecked(bool(_settings().value("engines/window", False, type=bool)))
@@ -189,11 +286,13 @@ class EngineListDialog(QDialog):
 
         self.btn_add.clicked.connect(self._add_engine)
         self.btn_set.clicked.connect(self._edit_selected)
+        self.btn_rename.clicked.connect(self._rename_selected)
         self.btn_delete.clicked.connect(self._delete_selected)
         btn_ok.clicked.connect(self.accept)
 
         bottom.addWidget(self.btn_add)
         bottom.addWidget(self.btn_set)
+        bottom.addWidget(self.btn_rename)
         bottom.addWidget(self.btn_delete)
         bottom.addStretch(1)
         bottom.addWidget(self.window_check)
@@ -214,7 +313,10 @@ class EngineListDialog(QDialog):
             self.table.setItem(r, 0, QTableWidgetItem(engine.get("name", "")))
             self.table.setItem(r, 1, QTableWidgetItem(engine.get("author", "")))
             self.table.setItem(r, 2, QTableWidgetItem(engine.get("path", "")))
-            self.table.item(r,0).setToolTip(f"Version: {engine.get('version','unverified')}\nKind: {engine.get('kind','unknown')}\nPlayable: {registry.playable(engine)}\nCapabilities: {engine.get('capabilities',{})}")
+            tooltip = f"Version: {engine.get('version','unverified')}\nKind: {engine.get('kind','unknown')}\nPlayable: {registry.playable(engine)}\nCapabilities: {engine.get('capabilities',{})}"
+            self.table.item(r, 0).setToolTip(tooltip)
+            self.table.item(r, 1).setToolTip(tooltip)
+            self.table.item(r, 2).setToolTip(f"{engine.get('path', '')}\n\n{tooltip}")
 
         self.table.clearSelection()
         self._sync_buttons()
@@ -231,7 +333,28 @@ class EngineListDialog(QDialog):
         row = self._selected_row()
         enabled = row >= 0
         self.btn_set.setEnabled(enabled)
+        self.btn_rename.setEnabled(enabled)
         self.btn_delete.setEnabled(enabled)
+
+    def _rename_selected(self):
+        row = self._selected_row()
+        if row < 0:
+            return
+        engine = self.engines[row]
+        cur_name = engine.get("name", "")
+        new_name, ok = QInputDialog.getText(
+            self,
+            "Rename Engine",
+            "Enter new engine display name:",
+            QLineEdit.EchoMode.Normal,
+            cur_name,
+        )
+        if ok and new_name.strip() and new_name.strip() != cur_name:
+            new_name = new_name.strip()
+            engine["name"] = new_name
+            engine["engine_name"] = new_name
+            registry.save(self.engines)
+            self._refresh()
 
     def _register_dialog(self,dlg,old=None):
         data=dlg.engine_data()
@@ -344,6 +467,21 @@ class GameSettingsDialog(QDialog):
         times.addWidget(self.cam_time, 1)
         times.addWidget(self.xanh_time_wrap, 1)
         root.addLayout(times)
+
+        # Independent finite engine budget; the live clock may lower this cap.
+        engine_budget_row = QHBoxLayout()
+        engine_budget_row.addWidget(QLabel("Engine thinking time / move"))
+        self.engine_move_time_ms = QSpinBox()
+        self.engine_move_time_ms.setRange(100, 60000)
+        self.engine_move_time_ms.setSingleStep(100)
+        self.engine_move_time_ms.setSuffix(" ms")
+        self.engine_move_time_ms.setToolTip(
+            "Maximum thinking time for one engine move. Separate from game clocks "
+            "and Engine Workspace finite analysis time."
+        )
+        engine_budget_row.addWidget(self.engine_move_time_ms)
+        engine_budget_row.addStretch(1)
+        root.addLayout(engine_budget_row)
 
         # --------------------------------------------------------------
         # Optional opening-book surfaces.  They are UI placeholders until
@@ -588,6 +726,7 @@ class GameSettingsDialog(QDialog):
         self.xanh_time.hours.setValue(int(s.value("game/xanh_hours", 0)))
         self.xanh_time.minutes.setValue(int(s.value("game/xanh_minutes", 10)))
         self.xanh_time.countdown.setValue(int(s.value("game/xanh_countdown", 30)))
+        self.engine_move_time_ms.setValue(int(s.value("game/engine_move_time_ms", 1000)))
 
         use_this = s.value("game/start_this_position", False, type=bool)
         self.radio_this.setChecked(use_this)
@@ -643,6 +782,7 @@ class GameSettingsDialog(QDialog):
             "cam_hours": self.cam_time.hours.value(),
             "cam_minutes": self.cam_time.minutes.value(),
             "cam_countdown": self.cam_time.countdown.value(),
+            "engine_move_time_ms": self.engine_move_time_ms.value(),
             "separate_xanh_time": separate,
             "xanh_hours": self.xanh_time.hours.value() if separate else self.cam_time.hours.value(),
             "xanh_minutes": self.xanh_time.minutes.value() if separate else self.cam_time.minutes.value(),
@@ -715,12 +855,82 @@ class ConsiderSettingsDialog(QDialog):
 
         set_box = QGroupBox("Set")
         form = QFormLayout(set_box)
-        self.candidates = QComboBox(); self.candidates.addItems([str(i) for i in range(1, 11)])
+        self.candidates = QComboBox()
+        self.candidates.addItems(["1", "2", "3"])
         form.addRow("Candidates", self.candidates)
         form.addRow(QCheckBox("Use Book"))
         form.addRow(QCheckBox("Branch to the top"))
-        root.addWidget(set_box, 1)
+        root.addWidget(set_box)
+
+        # Mũi tên phân tích Engine (MultiPV Arrows)
+        arrow_box = QGroupBox("Mũi tên phân tích Engine (MultiPV Arrows)")
+        arrow_form = QFormLayout(arrow_box)
+        self.cb_show_arrows = QCheckBox("Hiển thị mũi tên phân tích trên bàn cờ")
+        self.combo_arrow_count = QComboBox()
+        self.combo_arrow_count.addItem("1 mũi tên (Tối ưu nhất - Rank 1)", 1)
+        self.combo_arrow_count.addItem("2 mũi tên (Rank 1 & 2)", 2)
+        self.combo_arrow_count.addItem("3 mũi tên (Đa góc nhìn - Rank 1, 2, 3)", 3)
+
+        settings = _settings()
+        val = settings.value("analysis/show_arrows", True)
+        if isinstance(val, str):
+            show_arr = val.lower() in ("true", "1")
+        else:
+            show_arr = bool(val)
+        arr_cnt = int(settings.value("analysis/arrow_count", 3))
+        self.cb_show_arrows.setChecked(show_arr)
+        idx = self.combo_arrow_count.findData(arr_cnt)
+        if idx >= 0:
+            self.combo_arrow_count.setCurrentIndex(idx)
+        cand_idx = self.candidates.findText(str(arr_cnt))
+        if cand_idx >= 0:
+            self.candidates.setCurrentIndex(cand_idx)
+
+        # Sync Candidates and arrow count
+        def _on_candidates_changed(txt):
+            try:
+                val = int(txt)
+                i = self.combo_arrow_count.findData(val)
+                if i >= 0 and self.combo_arrow_count.currentIndex() != i:
+                    self.combo_arrow_count.setCurrentIndex(i)
+            except (ValueError, TypeError):
+                pass
+        self.candidates.currentTextChanged.connect(_on_candidates_changed)
+
+        def _on_arrows_changed(i):
+            val = self.combo_arrow_count.currentData()
+            if val:
+                self.cb_show_arrows.setChecked(True)
+                ci = self.candidates.findText(str(val))
+                if ci >= 0 and self.candidates.currentIndex() != ci:
+                    self.candidates.setCurrentIndex(ci)
+        self.combo_arrow_count.currentIndexChanged.connect(_on_arrows_changed)
+
+        arrow_form.addRow(self.cb_show_arrows)
+        arrow_form.addRow("Số lượng mũi tên:", self.combo_arrow_count)
+        root.addWidget(arrow_box)
         root.addWidget(_dialog_buttons(self))
+
+    def accept(self):
+        settings = _settings()
+        show_arr = self.cb_show_arrows.isChecked()
+        arr_cnt = self.combo_arrow_count.currentData() or 1
+        settings.setValue("analysis/show_arrows", show_arr)
+        settings.setValue("analysis/arrow_count", arr_cnt)
+        settings.sync()
+        p = self.parent()
+        if p:
+            if hasattr(p, "board"):
+                p.board.set_show_engine_arrows(show_arr)
+                p.board.set_max_engine_arrows(arr_cnt)
+            if hasattr(p, "act_toggle_arrows"):
+                p.act_toggle_arrows.setChecked(show_arr)
+            if hasattr(p, "engine_controller") and p.engine_controller:
+                p.engine_controller.options['MultiPV'] = arr_cnt
+            if getattr(p, "_live_analysis_active", False):
+                if hasattr(p, "_restart_analysis"):
+                    p._restart_analysis()
+        super().accept()
 
 
 class HintSettingsDialog(QDialog):
@@ -739,6 +949,7 @@ class HintSettingsDialog(QDialog):
         row.addWidget(self.seconds); row.addWidget(QLabel("S")); row.addStretch(1)
         root.addWidget(settings_box, 1)
         root.addWidget(_dialog_buttons(self))
+
 
 
 class MateSettingsDialog(QDialog):
@@ -765,6 +976,7 @@ class MateSettingsDialog(QDialog):
         root.addWidget(_dialog_buttons(self))
 
 
+
 class OptionsDialog(QDialog):
     """Options window with the tab structure requested by the user."""
 
@@ -783,6 +995,7 @@ class OptionsDialog(QDialog):
         tabs.addTab(self._user_tab(), "User")
         root.addWidget(tabs, 1)
         root.addWidget(_dialog_buttons(self))
+
 
     def _general_tab(self) -> QWidget:
         w = QWidget(); l = QVBoxLayout(w)

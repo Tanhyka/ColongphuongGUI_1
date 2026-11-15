@@ -61,13 +61,14 @@ class RecoveryActions:
         if not getattr(self,'_session_ready',False):return
         try:
             meta=getattr(self,'record_metadata',{})
-            if meta.get('signature'):
+            if meta.get('signature') and not getattr(self,'_document_dirty',False):
                 from engine.records import history_signature
                 if history_signature(self.game)!=meta['signature']:self._document_dirty=True
+            encoded=encode_game(self.game)
             workspace=self._workspace_snapshot()
-            signature=json.dumps([encode_game(self.game),workspace],sort_keys=True,ensure_ascii=False)
+            signature=json.dumps([encoded,workspace],sort_keys=True,ensure_ascii=False)
             if clean or signature!=self._last_session:
-                self._session_store.save(self.game,workspace,clean=clean);self._last_session=signature
+                self._session_store.save(self.game,workspace,clean=clean,encoded_game=encoded);self._last_session=signature
         except (OSError,ValueError,KeyError,TypeError) as exc:
             self.statusBar().showMessage(f'Session autosave failed: {exc}',10000)
 
@@ -86,7 +87,9 @@ class RecoveryActions:
         self.record_metadata=ws.get('record_metadata',{});self.game_setup_config=ws.get('setup',{})
         self.card_cam.set_player_name(ws.get('player_cam') or 'Cam');self.card_xanh.set_player_name(ws.get('player_xanh') or 'Xanh')
         if self.board.is_flipped!=bool(ws.get('flipped')):self._on_turn_board()
-        self.board.reset_transient_state();self.board._clear_annotations();self.board.set_moves_enabled(ws.get('moves_enabled',True))
+        self.board.allow_analysis_after_result=True
+        self._position_editable=bool(ws.get('moves_enabled',True))
+        self.board.reset_transient_state();self.board._clear_annotations();self.board.set_moves_enabled(bool(ws.get('moves_enabled',True)) and not game.is_board_terminal())
         if ws.get('geometry') and not hasattr(self,'workspace_docks'):
             from PyQt6.QtCore import QByteArray
             self.restoreGeometry(QByteArray.fromBase64(ws['geometry'].encode()))

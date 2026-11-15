@@ -1,5 +1,6 @@
 """Interactive board canvas widget for Co Long Phuong."""
 
+import math
 import os
 from typing import Optional, Tuple, Set, List
 from PyQt6.QtWidgets import QWidget
@@ -19,6 +20,7 @@ BOARD_ROWS = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i']
 COLOR_BOARD_BG = QColor("#ffffff")
 COLOR_LAST_MOVE = QColor("#ff6b6b")
 COLOR_SELECTED = QColor("#00e600")
+COLOR_SELECTED_OPPONENT = QColor("#ffb3b3")
 COLOR_POSSIBLE = QColor("#98ec98")
 
 # Annotation colors (chess.com / lichess style)
@@ -28,6 +30,7 @@ COLOR_ANNOT_GREEN_FILL = QColor(52, 168, 83, 115)
 
 class BoardCanvas(QWidget):
     moveMade = pyqtSignal(object)
+    engineArrowsChanged = pyqtSignal()
     pieceSelected = pyqtSignal(bool)
     selectionStateChanged = pyqtSignal(bool, bool, bool)
     geometryUpdated = pyqtSignal()
@@ -36,7 +39,7 @@ class BoardCanvas(QWidget):
     def __init__(self, game_instance: Game, parent=None):
         super().__init__(parent)
         self.game = game_instance
-        self.setMinimumSize(380, 380)
+        self.setMinimumSize(240, 240)
 
         self.selected_cell: Optional[Tuple[int, int]] = None
         self.pending_move: Optional[Move] = None
@@ -49,6 +52,7 @@ class BoardCanvas(QWidget):
         self.is_team_mode: bool = True
         self.is_flipped: bool = False
         self.moves_enabled: bool = True
+        self.allow_analysis_after_result: bool = True
 
         self.cell_size: float = 60.0
         self.board_rect: QRectF = QRectF(0, 0, 0, 0)
@@ -64,7 +68,24 @@ class BoardCanvas(QWidget):
         self._annot_drag_current: Optional[Tuple[int, int]] = None  # cell currently hovered during drag
         self._annot_dragging_ctrl: bool = False  # True if this drag started as Ctrl+Left instead of Right
 
+        # --- Dynamic MultiPV Engine Arrows ---
+        self.engine_arrows: dict = {}
+        self.show_engine_arrows: bool = True
+        self.max_engine_arrows: int = 1
+
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+
+    def _is_position_blocked(self) -> bool:
+        if self.allow_analysis_after_result and hasattr(self.game, "is_board_terminal"):
+            return self.game.is_board_terminal()
+        return self.game.is_over()
+
+    def _legal_moves(self):
+        return self.game.legal_moves(allow_nonterminal_analysis=self.allow_analysis_after_result)
+
+    def _commit_move(self, move: Move) -> bool:
+        return self.game.make_move(move, allow_nonterminal_analysis=self.allow_analysis_after_result)
 
     def toggle_flip(self):
         self.is_flipped = not self.is_flipped
@@ -87,6 +108,41 @@ class BoardCanvas(QWidget):
         self.cellInspected.emit(None, [])
         self._sync_toolbar_state()
         self.update()
+
+    def set_engine_arrow(self, rank: int, arrow_data: Optional[dict]):
+        """Sets or clears an engine arrow for a MultiPV rank (1, 2, or 3)."""
+        if arrow_data is None:
+            self.engine_arrows.pop(rank, None)
+        else:
+            if rank <= self.max_engine_arrows:
+                self.engine_arrows[rank] = dict(arrow_data)
+        for rk in list(self.engine_arrows.keys()):
+            if rk > self.max_engine_arrows:
+                self.engine_arrows.pop(rk, None)
+        self.update()
+        self.engineArrowsChanged.emit()
+
+    def clear_engine_arrows(self):
+        """Clears all dynamic MultiPV engine arrows from the board."""
+        if self.engine_arrows:
+            self.engine_arrows.clear()
+            self.update()
+            self.engineArrowsChanged.emit()
+
+    def set_show_engine_arrows(self, show: bool):
+        """Toggles visibility of dynamic MultiPV engine arrows."""
+        self.show_engine_arrows = bool(show)
+        self.update()
+        self.engineArrowsChanged.emit()
+
+    def set_max_engine_arrows(self, count: int):
+        """Sets the maximum number of MultiPV arrows to display (1 to 3)."""
+        self.max_engine_arrows = max(1, min(3, int(count)))
+        for rk in list(self.engine_arrows.keys()):
+            if rk > self.max_engine_arrows:
+                self.engine_arrows.pop(rk, None)
+        self.update()
+        self.engineArrowsChanged.emit()
 
     def set_show_coordinates(self, visible: bool):
         """Bật / tắt hiển thị nhãn tọa độ a-i, 1-9."""
@@ -135,19 +191,20 @@ class BoardCanvas(QWidget):
         selected = self.selected_cell is not None or self.pending_move is not None
         can_team = False
         can_rotate = False
+        can_act = self.moves_enabled and not self._is_position_blocked()
 
-        if self.pending_move is not None:
+        if can_act and self.pending_move is not None:
             can_rotate = self.pending_move.ptype not in NON_ROTATABLE
-        elif self.selected_cell is not None:
+        elif can_act and self.selected_cell is not None:
             sq = self.game.board.sq(*self.selected_cell)
-            if not sq.is_empty:
+            if not sq.is_empty and sq.top.owner is self.game.current:
                 can_rotate = sq.top.can_rotate()
-                can_team = len(sq.stack) > 1 and sq.top.owner is self.game.current
+                can_team = len(sq.stack) > 1
 
         self.toolbar.set_piece_selected_state(
             selected,
             can_team=can_team,
-            can_tick=self.pending_move is not None,
+            can_tick=can_act and (self.pending_move is not None),
             can_rotate=can_rotate,
         )
 
@@ -170,7 +227,7 @@ class BoardCanvas(QWidget):
         self.update()
 
     def select_hand_piece(self, ptype: PieceType):
-        if not self.moves_enabled or self.game.is_over():
+        if not self.moves_enabled or self._is_position_blocked():
             return
         if self.selected_hand_piece == ptype:
             self.selected_hand_piece = None
@@ -187,7 +244,7 @@ class BoardCanvas(QWidget):
     #   xoay thì nước đi phải kết thúc ngay, không chờ tick xác nhận.
     # ------------------------------------------------------------------
     def _on_rotate_action(self, rot_dir: int):
-        if not self.moves_enabled or self.game.is_over():
+        if not self.moves_enabled or self._is_position_blocked():
             return
 
         rot_dir = 1 if rot_dir > 0 else 3
@@ -209,7 +266,7 @@ class BoardCanvas(QWidget):
                 facing=self.pending_move.facing,
                 rotate_after=rot_dir,
             )
-            if self.game.make_move(committed):
+            if self._commit_move(committed):
                 self.last_move = committed
                 self._cancel_pending()
                 self._set_selection(None)
@@ -227,7 +284,7 @@ class BoardCanvas(QWidget):
                     ptype=sq.top.ptype,
                     rotate_after=rot_dir,
                 )
-                if self.game.make_move(committed):
+                if self._commit_move(committed):
                     self.last_move = committed
                     self._set_selection(None)
                     self._clear_annotations()
@@ -235,7 +292,7 @@ class BoardCanvas(QWidget):
                     self.update()
 
     def _on_tick_action(self):
-        if not self.moves_enabled or self.game.is_over() or self.pending_move is None:
+        if not self.moves_enabled or self._is_position_blocked() or self.pending_move is None:
             return
 
         p = self.pending_move
@@ -247,7 +304,7 @@ class BoardCanvas(QWidget):
             facing=p.facing,
             rotate_after=p.rotate_after,
         )
-        if self.game.make_move(committed):
+        if self._commit_move(committed):
             self.last_move = committed
             self._cancel_pending()
             self._set_selection(None)
@@ -301,6 +358,7 @@ class BoardCanvas(QWidget):
         self.annot_arrows.clear()
         self._annot_drag_start = None
         self._annot_drag_current = None
+        self.update()
 
     def _cell_center(self, r: int, c: int) -> QPointF:
         sr, sc = self._to_screen_coords(r, c)
@@ -359,8 +417,8 @@ class BoardCanvas(QWidget):
         ux, uy = dx / length, dy / length
         px, py = -uy, ux
 
-        shaft_half = max(2.5, cs * 0.055)
-        head_half = cs * 0.19
+        shaft_half = max(3.5, cs * 0.085)
+        head_half = cs * 0.21
         head_len = cs * 0.34
 
         # Tip sits inside the target cell, similar to lishogi.
@@ -385,6 +443,171 @@ class BoardCanvas(QWidget):
         painter.drawEllipse(p1, shaft_half, shaft_half)
         painter.restore()
 
+    def _draw_multipv_arrow(self, painter: QPainter, arrow: dict, offset_perp: float = 0.0):
+        """Vẽ mũi tên phân tích động trực quan cho các phương án MultiPV từ Engine:
+        - MultiPV 1 (Tối ưu nhất): Xanh lá cây đậm (#16A34A), alpha 210, nét liền width 6px, đầu tam giác length 16px angle 35°.
+        - MultiPV 2: Xanh dương (#2563EB), alpha 180, nét liền width 4px, đầu tam giác length 12px angle 30°.
+        - MultiPV 3: Cam hổ phách (#F59E0B), alpha 160, nét đứt width 3px, đầu tam giác length 10px angle 25°.
+        """
+        rank = arrow.get("multipv", 1)
+        if rank not in (1, 2, 3):
+            return
+
+        specs = {
+            1: {
+                "color": QColor(22, 163, 74, 210),   # #16A34A, alpha 210
+                "pen_style": Qt.PenStyle.SolidLine,
+                "width": 6.0,
+                "head_len": 16.0,
+                "angle_deg": 35.0,
+            },
+            2: {
+                "color": QColor(37, 99, 235, 180),   # #2563EB, alpha 180
+                "pen_style": Qt.PenStyle.SolidLine,
+                "width": 4.0,
+                "head_len": 12.0,
+                "angle_deg": 30.0,
+            },
+            3: {
+                "color": QColor(245, 158, 11, 160),  # #F59E0B (Cam), alpha 160
+                "pen_style": Qt.PenStyle.DashLine,
+                "width": 3.0,
+                "head_len": 10.0,
+                "angle_deg": 25.0,
+            },
+        }
+        spec = specs[rank]
+        color = spec["color"]
+        pen_style = spec["pen_style"]
+        width = spec["width"]
+        head_len = spec["head_len"]
+        angle_rad = math.radians(spec["angle_deg"])
+
+        src = arrow.get("src")
+        dst = arrow.get("dst")
+        if dst is None:
+            return
+
+        cs = self.cell_size
+        p2_raw = self._cell_center(*dst)
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        if src is None:
+            # Drop move (Thả quân từ tay vào ô dst)
+            cam_moving = arrow.get("cam", True)
+            dir_y = 1.0 if (cam_moving != self.is_flipped) else -1.0
+            p1 = QPointF(p2_raw.x() + offset_perp, p2_raw.y() - dir_y * cs * 0.75)
+            tip = QPointF(p2_raw.x() + offset_perp, p2_raw.y() - dir_y * cs * 0.12)
+
+            dx, dy = tip.x() - p1.x(), tip.y() - p1.y()
+            length = max(1e-6, math.hypot(dx, dy))
+            ux, uy = dx / length, dy / length
+            px, py = -uy, ux
+
+            base = QPointF(tip.x() - ux * head_len, tip.y() - uy * head_len)
+            half_w = head_len * math.tan(angle_rad)
+            head_l = QPointF(base.x() + px * half_w, base.y() + py * half_w)
+            head_r = QPointF(base.x() - px * half_w, base.y() - py * half_w)
+
+            pen = QPen(color, width, pen_style, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.drawLine(p1, base)
+
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(color))
+            painter.drawEllipse(p1, width * 0.9, width * 0.9)
+
+            arrow_head = QPolygonF([tip, head_l, head_r])
+            painter.drawPolygon(arrow_head)
+
+            target_pen = QPen(color, max(1.5, width * 0.4), Qt.PenStyle.DashLine)
+            painter.setPen(target_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(p2_raw, cs * 0.38, cs * 0.38)
+
+        elif src == dst:
+            # Xoay tại chỗ (Rotate on same square)
+            center = p2_raw
+            radius = cs * 0.32
+            pen = QPen(color, width, pen_style, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            arc_rect = QRectF(center.x() - radius, center.y() - radius, radius * 2, radius * 2)
+            painter.drawArc(arc_rect, int(45 * 16), int(270 * 16))
+
+            end_angle = math.radians(45)
+            tip = QPointF(center.x() + radius * math.cos(end_angle), center.y() - radius * math.sin(end_angle))
+            tan_x, tan_y = math.sin(end_angle), math.cos(end_angle)
+            ux, uy = tan_x, tan_y
+            px, py = -uy, ux
+            base = QPointF(tip.x() - ux * head_len, tip.y() - uy * head_len)
+            half_w = head_len * math.tan(angle_rad)
+            head_l = QPointF(base.x() + px * half_w, base.y() + py * half_w)
+            head_r = QPointF(base.x() - px * half_w, base.y() - py * half_w)
+
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(color))
+            painter.drawPolygon(QPolygonF([tip, head_l, head_r]))
+
+        else:
+            # Nước đi thông thường từ src sang dst
+            p1_raw = self._cell_center(*src)
+            dx, dy = p2_raw.x() - p1_raw.x(), p2_raw.y() - p1_raw.y()
+            length = max(1e-6, math.hypot(dx, dy))
+            ux, uy = dx / length, dy / length
+            px, py = -uy, ux
+
+            p1 = QPointF(p1_raw.x() + px * offset_perp, p1_raw.y() + py * offset_perp)
+            p2 = QPointF(p2_raw.x() + px * offset_perp, p2_raw.y() + py * offset_perp)
+
+            tip_offset = min(cs * 0.12, length * 0.1)
+            tip = QPointF(p2.x() - ux * tip_offset, p2.y() - uy * tip_offset)
+
+            base = QPointF(tip.x() - ux * head_len, tip.y() - uy * head_len)
+            half_w = head_len * math.tan(angle_rad)
+            head_l = QPointF(base.x() + px * half_w, base.y() + py * half_w)
+            head_r = QPointF(base.x() - px * half_w, base.y() - py * half_w)
+
+            pen = QPen(color, width, pen_style, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.drawLine(p1, base)
+
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(color))
+            painter.drawEllipse(p1, width * 0.85, width * 0.85)
+
+            arrow_head = QPolygonF([tip, head_l, head_r])
+            painter.drawPolygon(arrow_head)
+
+        painter.restore()
+
+    def _draw_engine_arrows(self, painter: QPainter):
+        if getattr(self, "_overlay_active", False):
+            return
+        if not self.show_engine_arrows or not self.engine_arrows:
+            return
+        active_ranks = [rk for rk in (1, 2, 3) if rk in self.engine_arrows and rk <= self.max_engine_arrows]
+        if not active_ranks:
+            return
+
+        offsets = {1: 0.0, 2: 0.0, 3: 0.0}
+        cs = self.cell_size
+        shift = cs * 0.09
+        if 1 in self.engine_arrows and 2 in self.engine_arrows:
+            a1, a2 = self.engine_arrows[1], self.engine_arrows[2]
+            if a1.get("src") == a2.get("src") and a1.get("dst") == a2.get("dst"):
+                offsets[1] = -shift
+                offsets[2] = shift
+        if 1 in self.engine_arrows and 3 in self.engine_arrows:
+            a1, a3 = self.engine_arrows[1], self.engine_arrows[3]
+            if a1.get("src") == a3.get("src") and a1.get("dst") == a3.get("dst"):
+                offsets[3] = shift * 2.0
+
+        for rk in sorted(active_ranks, reverse=True):
+            self._draw_multipv_arrow(painter, self.engine_arrows[rk], offset_perp=offsets.get(rk, 0.0))
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -399,20 +622,21 @@ class BoardCanvas(QWidget):
         # 2. Ô di chuyển hợp lệ
         active_last_move = self.last_move or (self.game.current_node.move if self.game.current_node else None)
 
-        legal_moves = self.game.legal_moves()
         dest_moves: Set[Tuple[int, int]] = set()
-
-        if self.pending_move is None:
+        if self.moves_enabled and not self._is_position_blocked() and self.pending_move is None:
+            legal_moves = self._legal_moves()
             if self.selected_cell:
-                wanted_kind = 'team' if self.is_team_mode else 'single'
-                matches = [
-                    m.dst for m in legal_moves
-                    if m.src == self.selected_cell and m.dst and m.kind == wanted_kind
-                ] or [
-                    m.dst for m in legal_moves
-                    if m.src == self.selected_cell and m.dst and m.kind == 'single'
-                ]
-                dest_moves = set(matches)
+                sq_sel = self.game.board.sq(*self.selected_cell)
+                if not sq_sel.is_empty and sq_sel.top.owner == self.game.current:
+                    wanted_kind = 'team' if self.is_team_mode else 'single'
+                    matches = [
+                        m.dst for m in legal_moves
+                        if m.src == self.selected_cell and m.dst and m.kind == wanted_kind
+                    ] or [
+                        m.dst for m in legal_moves
+                        if m.src == self.selected_cell and m.dst and m.kind == 'single'
+                    ]
+                    dest_moves = set(matches)
             elif self.selected_hand_piece is not None:
                 dest_moves = {
                     m.dst for m in legal_moves
@@ -440,7 +664,10 @@ class BoardCanvas(QWidget):
             painter.fillRect(get_cell_rect(dr, dc), COLOR_POSSIBLE)
 
         if self.selected_cell and self.pending_move is None:
-            painter.fillRect(get_cell_rect(*self.selected_cell), COLOR_SELECTED)
+            sq_sel = self.game.board.sq(*self.selected_cell)
+            if not sq_sel.is_empty:
+                sel_color = COLOR_SELECTED if sq_sel.top.owner == self.game.current else COLOR_SELECTED_OPPONENT
+                painter.fillRect(get_cell_rect(*self.selected_cell), sel_color)
 
         # 4. Lưới ô cờ
         painter.setPen(QPen(QColor("#414141"), 1))
@@ -560,6 +787,9 @@ class BoardCanvas(QWidget):
         # 8. Chú thích mũi tên / vòng tròn (phải chuột hoặc Ctrl+trái chuột)
         self._draw_annotations(painter)
 
+        # 8.1 MultiPV Analysis Arrows from Engine
+        self._draw_engine_arrows(painter)
+
         # 9. Stack badges are always the topmost layer.
         for bcx, bcy, bsize, blen, bowner in badge_overlays:
             self._draw_stack_badge(painter, bcx, bcy, bsize, blen, bowner)
@@ -663,6 +893,20 @@ class BoardCanvas(QWidget):
         painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, str(stack_len))
         painter.restore()
 
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            if (
+                self.annot_circles
+                or self.annot_arrows
+                or self._annot_drag_start is not None
+            ):
+                self._clear_annotations()
+                self._annot_dragging_ctrl = False
+                self.update()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
     # ------------------------------------------------------------------
     # Mouse handling
     # ------------------------------------------------------------------
@@ -684,9 +928,6 @@ class BoardCanvas(QWidget):
                 self.update()
             return
 
-        if not self.moves_enabled or self.game.is_over():
-            return
-
         # A plain left click (no ctrl) clears any annotations first,
         # same convention as chess.com/lichess.
         if event.button() == Qt.MouseButton.LeftButton and (self.annot_circles or self.annot_arrows):
@@ -702,13 +943,23 @@ class BoardCanvas(QWidget):
         display_r = max(0, min(8, int((pos.y() - by) // cs)))
         row, col = self._to_matrix_coords(display_r, display_c)
 
+        # Even when moves are disabled or position is terminal, allow clicking any stack/piece
+        # (own or opponent) to inspect it in the top-right StackInspectorWidget.
+        if not self.moves_enabled or self._is_position_blocked():
+            sq = self.game.board.sq(row, col)
+            if self.selected_cell == (row, col) or sq.is_empty:
+                self._set_selection(None)
+            else:
+                self._set_selection((row, col))
+            return
+
         if self.pending_move is not None:
             if self.pending_move.src == (row, col) or self.pending_move.dst == (row, col):
                 self._cancel_pending()
                 self._set_selection((row, col))
             return
 
-        legal = self.game.legal_moves()
+        legal = self._legal_moves()
 
         if self.selected_hand_piece is not None:
             drop_moves = [
@@ -725,7 +976,7 @@ class BoardCanvas(QWidget):
                         facing=selected_drop.facing,
                         rotate_after=0,
                     )
-                    if self.game.make_move(commit_move):
+                    if self._commit_move(commit_move):
                         self.selected_hand_piece = None
                         self.last_move = commit_move
                         self._cancel_pending()
@@ -750,8 +1001,8 @@ class BoardCanvas(QWidget):
 
         if self.selected_cell is None:
             sq = self.game.board.sq(row, col)
-            if not sq.is_empty and sq.top.owner == self.game.current:
-                if len(sq.stack) <= 1 and self.toolbar:
+            if not sq.is_empty:
+                if sq.top.owner == self.game.current and len(sq.stack) <= 1 and self.toolbar:
                     self.toolbar.set_team_mode(False)
                     self.is_team_mode = False
                 self._set_selection((row, col))
@@ -762,6 +1013,18 @@ class BoardCanvas(QWidget):
             self._set_selection(None)
             return
 
+        sel_sq = self.game.board.sq(src_r, src_c)
+        if sel_sq.is_empty or sel_sq.top.owner != self.game.current:
+            sq = self.game.board.sq(row, col)
+            if not sq.is_empty:
+                if sq.top.owner == self.game.current and len(sq.stack) <= 1 and self.toolbar:
+                    self.toolbar.set_team_mode(False)
+                    self.is_team_mode = False
+                self._set_selection((row, col))
+            else:
+                self._set_selection(None)
+            return
+
         wanted_kind = 'team' if self.is_team_mode else 'single'
         matched_move = next(
             (m for m in legal if m.src == (src_r, src_c) and m.dst == (row, col) and m.kind == wanted_kind),
@@ -770,7 +1033,13 @@ class BoardCanvas(QWidget):
 
         if not matched_move:
             sq = self.game.board.sq(row, col)
-            self._set_selection((row, col) if not sq.is_empty and sq.top.owner == self.game.current else None)
+            if not sq.is_empty:
+                if sq.top.owner == self.game.current and len(sq.stack) <= 1 and self.toolbar:
+                    self.toolbar.set_team_mode(False)
+                    self.is_team_mode = False
+                self._set_selection((row, col))
+            else:
+                self._set_selection(None)
             return
 
         if matched_move.ptype in NON_ROTATABLE:
@@ -782,7 +1051,7 @@ class BoardCanvas(QWidget):
                 facing=matched_move.facing,
                 rotate_after=0,
             )
-            if self.game.make_move(commit_move):
+            if self._commit_move(commit_move):
                 self.last_move = commit_move
                 self._cancel_pending()
                 self._set_selection(None)
@@ -841,3 +1110,248 @@ class BoardCanvas(QWidget):
             return
 
         super().mouseReleaseEvent(event)
+
+
+class EngineArrowOverlay(QWidget):
+    """Transparent overlay spanning board_row_widget (left komadai, board, right komadai)
+    to render MultiPV arrows seamlessly across trays and board.
+    Drop moves start directly from the piece item on the player's Komadai stand.
+    """
+
+    def __init__(self, board_row_widget, board, komadai_cam, komadai_xanh, parent=None):
+        super().__init__(parent or board_row_widget)
+        self.board_row_widget = board_row_widget
+        self.board = board
+        self.komadai_cam = komadai_cam
+        self.komadai_xanh = komadai_xanh
+
+        self.setObjectName("engineArrowOverlay")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setStyleSheet("background: transparent;")
+
+    def paintEvent(self, _event):
+        if self.rect() != self.board_row_widget.rect():
+            self.setGeometry(self.board_row_widget.rect())
+
+        board = self.board
+        if board is None:
+            return
+        if not getattr(board, "show_engine_arrows", True):
+            return
+        engine_arrows = getattr(board, "engine_arrows", {})
+        if not engine_arrows:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+        specs = {
+            1: {
+                "color": QColor(22, 163, 74, 215),   # #16A34A (Xanh lá), alpha 215
+                "pen_style": Qt.PenStyle.SolidLine,
+                "width": 6.0,
+                "head_len": 16.0,
+                "angle_deg": 35.0,
+            },
+            2: {
+                "color": QColor(37, 99, 235, 185),   # #2563EB (Xanh dương), alpha 185
+                "pen_style": Qt.PenStyle.SolidLine,
+                "width": 4.5,
+                "head_len": 13.0,
+                "angle_deg": 30.0,
+            },
+            3: {
+                "color": QColor(245, 158, 11, 170),  # #F59E0B (Cam hổ phách), alpha 170
+                "pen_style": Qt.PenStyle.DashLine,
+                "width": 3.5,
+                "head_len": 11.0,
+                "angle_deg": 25.0,
+            },
+        }
+
+        max_arr = getattr(board, "max_engine_arrows", 3)
+        active_ranks = [rk for rk in (1, 2, 3) if rk in engine_arrows and rk <= max_arr]
+        if not active_ranks:
+            return
+
+        # MultiPV arrows offset if overlapping
+        offsets = {1: 0.0, 2: 0.0, 3: 0.0}
+        shift = getattr(board, "cell_size", 40.0) * 0.09
+        if 1 in active_ranks and 2 in active_ranks:
+            a1, a2 = engine_arrows[1], engine_arrows[2]
+            if a1.get("src") == a2.get("src") and a1.get("dst") == a2.get("dst") and a1.get("kind") == a2.get("kind"):
+                offsets[1] = -shift
+                offsets[2] = shift
+        if 1 in active_ranks and 3 in active_ranks:
+            a1, a3 = engine_arrows[1], engine_arrows[3]
+            if a1.get("src") == a3.get("src") and a1.get("dst") == a3.get("dst") and a1.get("kind") == a3.get("kind"):
+                offsets[3] = shift * 2.0
+
+        for rk in sorted(active_ranks, reverse=True):
+            self._draw_overlay_arrow(painter, engine_arrows[rk], specs[rk], offset_perp=offsets.get(rk, 0.0))
+
+    def _draw_overlay_arrow(self, painter: QPainter, arrow: dict, spec: dict, offset_perp: float = 0.0):
+        color = spec["color"]
+        pen_style = spec["pen_style"]
+        width = spec["width"]
+        head_len = spec["head_len"]
+        angle_rad = math.radians(spec["angle_deg"])
+
+        src = arrow.get("src")
+        dst = arrow.get("dst")
+        if dst is None:
+            return
+
+        # Cell center on board
+        if isinstance(dst, (tuple, list)):
+            p2_board = self.board._cell_center(dst[0], dst[1])
+        else:
+            p2_board = self.board._cell_center(dst // 9, dst % 9)
+        p2_raw = self.board.mapTo(self.board_row_widget, p2_board)
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        kind = arrow.get("kind", "single")
+        is_drop = (kind == "drop") or (src is None)
+
+        cs = getattr(self.board, "cell_size", 40.0)
+
+        if is_drop:
+            # === NƯỚC THẢ QUÂN: Mũi tên kéo từ quân trên komadai vào ô dst ===
+            cam_moving = arrow.get("cam", True)
+            tray = self.komadai_cam if cam_moving else self.komadai_xanh
+
+            # Resolve piece type
+            ptype = arrow.get("ptype", "")
+            if hasattr(ptype, "name"):
+                p_code = ptype.name.lower()
+            else:
+                p_code = str(ptype).lower()
+
+            if p_code in ("ki", "ky", "k"):
+                p_code = "ky"
+            elif p_code in ("l", "long"):
+                p_code = "long"
+            elif p_code in ("p", "phuong"):
+                p_code = "phuong"
+            elif p_code in ("b", "binh"):
+                p_code = "binh"
+            elif p_code in ("s", "si"):
+                p_code = "si"
+            elif p_code in ("t", "tuong"):
+                p_code = "tuong"
+            elif p_code in ("x", "xa"):
+                p_code = "xa"
+
+            target_item = None
+            if tray is not None and hasattr(tray, "items"):
+                target_item = tray.items.get(p_code)
+
+            if target_item is not None and target_item.width() > 0:
+                p1_raw = target_item.mapTo(self.board_row_widget, QPointF(target_item.width() / 2.0, target_item.height() / 2.0))
+            elif tray is not None and tray.width() > 0:
+                p1_raw = tray.mapTo(self.board_row_widget, QPointF(tray.width() / 2.0, tray.height() / 2.0))
+            else:
+                dir_y = 1.0 if (cam_moving != getattr(self.board, "is_flipped", False)) else -1.0
+                p1_raw = QPointF(p2_raw.x(), p2_raw.y() - dir_y * cs * 1.5)
+
+            dx = p2_raw.x() - p1_raw.x()
+            dy = p2_raw.y() - p1_raw.y()
+            length = max(1e-6, math.hypot(dx, dy))
+            ux, uy = dx / length, dy / length
+            px, py = -uy, ux
+
+            p1 = QPointF(p1_raw.x() + px * offset_perp, p1_raw.y() + py * offset_perp)
+            p2 = QPointF(p2_raw.x() + px * offset_perp, p2_raw.y() + py * offset_perp)
+
+            tip_offset = min(cs * 0.12, length * 0.1)
+            tip = QPointF(p2.x() - ux * tip_offset, p2.y() - uy * tip_offset)
+
+            base = QPointF(tip.x() - ux * head_len, tip.y() - uy * head_len)
+            half_w = head_len * math.tan(angle_rad)
+            head_l = QPointF(base.x() + px * half_w, base.y() + py * half_w)
+            head_r = QPointF(base.x() - px * half_w, base.y() - py * half_w)
+
+            # Thân mũi tên
+            pen = QPen(color, width, pen_style, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.drawLine(p1, base)
+
+            # Điểm tròn nhỏ neo tại ô quân trên tay
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(color))
+            painter.drawEllipse(p1, width * 0.9, width * 0.9)
+
+            # Đầu mũi tên tam giác tại ô đích
+            arrow_head = QPolygonF([tip, head_l, head_r])
+            painter.drawPolygon(arrow_head)
+
+            # Vòng tròn nét đứt quanh ô đích đến trên bàn cờ
+            target_pen = QPen(color, max(1.5, width * 0.4), Qt.PenStyle.DashLine)
+            painter.setPen(target_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(p2_raw, cs * 0.38, cs * 0.38)
+
+        elif src == dst:
+            # === XOAY TẠI CHỖ (Rotate on same square) ===
+            center = p2_raw
+            radius = cs * 0.32
+            pen = QPen(color, width, pen_style, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            arc_rect = QRectF(center.x() - radius, center.y() - radius, radius * 2, radius * 2)
+            painter.drawArc(arc_rect, int(45 * 16), int(270 * 16))
+
+            end_angle = math.radians(45)
+            tip = QPointF(center.x() + radius * math.cos(end_angle), center.y() - radius * math.sin(end_angle))
+            tan_x, tan_y = math.sin(end_angle), math.cos(end_angle)
+            ux, uy = tan_x, tan_y
+            px, py = -uy, ux
+            base = QPointF(tip.x() - ux * head_len, tip.y() - uy * head_len)
+            half_w = head_len * math.tan(angle_rad)
+            head_l = QPointF(base.x() + px * half_w, base.y() + py * half_w)
+            head_r = QPointF(base.x() - px * half_w, base.y() - py * half_w)
+
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(color))
+            painter.drawPolygon(QPolygonF([tip, head_l, head_r]))
+
+        else:
+            # === NƯỚC ĐI THÔNG THƯỜNG TRÊN BÀN CỜ ===
+            if isinstance(src, (tuple, list)):
+                p1_board = self.board._cell_center(src[0], src[1])
+            else:
+                p1_board = self.board._cell_center(src // 9, src % 9)
+            p1_raw = self.board.mapTo(self.board_row_widget, p1_board)
+
+            dx, dy = p2_raw.x() - p1_raw.x(), p2_raw.y() - p1_raw.y()
+            length = max(1e-6, math.hypot(dx, dy))
+            ux, uy = dx / length, dy / length
+            px, py = -uy, ux
+
+            p1 = QPointF(p1_raw.x() + px * offset_perp, p1_raw.y() + py * offset_perp)
+            p2 = QPointF(p2_raw.x() + px * offset_perp, p2_raw.y() + py * offset_perp)
+
+            tip_offset = min(cs * 0.12, length * 0.1)
+            tip = QPointF(p2.x() - ux * tip_offset, p2.y() - uy * tip_offset)
+
+            base = QPointF(tip.x() - ux * head_len, tip.y() - uy * head_len)
+            half_w = head_len * math.tan(angle_rad)
+            head_l = QPointF(base.x() + px * half_w, base.y() + py * half_w)
+            head_r = QPointF(base.x() - px * half_w, base.y() - py * half_w)
+
+            pen = QPen(color, width, pen_style, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.drawLine(p1, base)
+
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(color))
+            painter.drawEllipse(p1, width * 0.85, width * 0.85)
+
+            arrow_head = QPolygonF([tip, head_l, head_r])
+            painter.drawPolygon(arrow_head)
+
+        painter.restore()

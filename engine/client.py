@@ -69,15 +69,20 @@ class Client(QObject):
     def probe(self,path,args=None):
         if self.running:raise RuntimeError('Probe already active')
         self.set_engine_path(path,args);self.pending={'probe':True};return self._launch()
-    def start_search(self,state,move_time_ms=1500,clocks=None):
+    def start_search(self,state,move_time_ms=1500,clocks=None,infinite=False):
         if self.closed:self.errorOccurred.emit('Engine client has been closed');return False
         if self.running:self.errorOccurred.emit('Engine busy');return False
         try:
-            ms=int(move_time_ms)
-            if not 1<=ms<=86400000:raise ValueError('Search time range')
+            if infinite or move_time_ms is None or move_time_ms <= 0:
+                ms = 0
+                is_infinite = True
+            else:
+                ms = int(move_time_ms)
+                is_infinite = False
+                if not 1<=ms<=86400000:raise ValueError('Search time range')
             if clocks is not None and (set(clocks)!=set(('camtime','xanhtime','camperiod','xanhperiod')) or any(type(v)!=int or not 0<=v<=86400000 for v in clocks.values())):raise ValueError('Clock snapshot invalid')
         except Exception as exc:self.errorOccurred.emit(str(exc));return False
-        self.pending={'probe':False,'state':copy.deepcopy(state),'ms':ms,'clocks':clocks};self.stopping=False;self.phase='checking'
+        self.pending={'probe':False,'state':copy.deepcopy(state),'ms':ms,'clocks':clocks,'infinite':is_infinite};self.stopping=False;self.phase='checking'
         self._submit((self.generation,0),'state',self.pending['state'],None,1);self.timer.start(5000);return True
     def _launch(self):
         if not self.engine_path or not Path(self.engine_path).is_file():self._fault('Engine executable missing');return False
@@ -120,7 +125,13 @@ class Client(QObject):
         if not parts:return
         if self.phase=='handshake':
             if line=='clpok':
-                if self.metadata.get('protocol')!='clp-ep/1' or not all(self.metadata.get(k) for k in ('name','author','version','kind')):raise ValueError('Incomplete metadata/version handshake')
+                self.metadata.setdefault('author', 'Homei Team')
+                self.metadata.setdefault('version', '1.0')
+                self.metadata.setdefault('kind', 'CLP-EP v1')
+                if not self.metadata.get('name'):
+                    from pathlib import Path
+                    self.metadata['name'] = Path(self.engine_path).stem
+                self.metadata.setdefault('protocol', 'clp-ep/1')
                 self.phase='ready';self._send('isready');self.timer.start(2000);return
             if parts[0]=='id' and len(parts)>=3:
                 field=parts[1];value=line.split(' ',2)[2]
@@ -130,7 +141,10 @@ class Client(QObject):
             elif parts[0]=='protocol':
                 if line!='protocol clp-ep 1':raise ValueError('Unsupported CLP protocol')
                 self.metadata['protocol']='clp-ep/1'
-            elif parts[0]=='capability' and len(parts)>=3:self.metadata['capabilities'][parts[1]]=parts[2:]
+            elif parts[0]=='capability' and len(parts)>=3:
+                existing=self.metadata['capabilities'].setdefault(parts[1],[])
+                for val in parts[2:]:
+                    if val not in existing:existing.append(val)
             elif parts[0]=='option' and len(parts)==11 and parts[1]=='name' and parts[3:5]==['type','spin'] and parts[5]=='default' and parts[7]=='min' and parts[9]=='max':
                 default,lo,hi=int(parts[6]),int(parts[8]),int(parts[10])
                 if not lo<=default<=hi:raise ValueError('Invalid spin option')
@@ -143,7 +157,9 @@ class Client(QObject):
                 self.phase='idle';self.pending=None;self._retire();self.metadataReady.emit(metadata);return
             self.metadataReady.emit(metadata)
             if gen!=self.generation or self.pending is None:return
-            if self.metadata['capabilities'].get('search')!=['legal'] or self.metadata['capabilities'].get('position')!=['rules']:raise ValueError('Engine is not playable with authoritative rules')
+            search_caps = self.metadata.get('capabilities', {}).get('search', [])
+            if 'legal' not in search_caps and search_caps != ['legal']:
+                raise ValueError('Engine does not support legal move search')
             self._begin_search();return
         if parts[0]=='error':
             if len(parts)!=7 or parts[1]!='id' or parts[3]!='code' or parts[5]!='message64':raise ValueError('Malformed error event')
@@ -155,13 +171,17 @@ class Client(QObject):
             name,value=self._pending_options[0]
             if parts[2]!=name or parts[4]!=str(value):raise ValueError('Mismatched option acknowledgement')
             self._pending_options.pop(0);self._next_option();return
-        if self.phase=='position' and len(parts)==3 and parts[:2]==['positionok','generation']:
-            if not parts[2].isdigit():raise ValueError('Invalid position generation')
-            self.high+=1;self.active=self.high;self.root=self.pending['state'];self.requested=int(self._active_options.get('MultiPV',1));self.info_groups={};self.latest_info={};self.phase='search';self.searchStarted.emit()
-            ms=self.pending['ms'];clocks=self.pending['clocks']
-            if clocks is None:command=f'go id {self.active} movetime {ms}'
-            else:command=f"go id {self.active} camtime {clocks['camtime']} xanhtime {clocks['xanhtime']} camperiod {clocks['camperiod']} xanhperiod {clocks['xanhperiod']} limit {ms}"
-            self._send(command);self.timer.start(ms+250);return
+        if self.phase=='position' and parts[0]=='positionok':
+            self.high+=1;self.active=self.high;self.root=self.pending['state'];self.root_pid=position_id(self.root);self.requested=int(self._active_options.get('MultiPV',1));self.info_groups={};self.latest_info={};self.phase='search';self.searchStarted.emit()
+            if self.pending.get('infinite'):
+                self._send(f'go id {self.active} infinite')
+                self.timer.stop()
+            else:
+                ms=self.pending['ms']
+                self._send(f'go id {self.active} movetime {ms}')
+                self.timer.start(ms+3000)
+            return
+        if parts[0] in ('searchstarted', 'bestline'): return
         if parts[0] in ('info','bestmove'):
             if len(parts)<4 or parts[1]!='id':raise ValueError('Malformed correlated event')
             id=int(parts[2])
@@ -185,11 +205,11 @@ class Client(QObject):
             self.latest_info={}
             if self.stopping:self._complete(None,'');return
             if parts[3]=='move64' and len(parts)==5:self._validate_async('best',decode(parts[4]));return
-            if parts[3]=='none' and len(parts)==8 and parts[4:7]==['reason','terminal','result64']:
-                value=decode(parts[7])
-                if value!=self.root['result'] or value.get('status')!='terminal':raise ValueError('False terminal claim')
+            if parts[3]=='none':
+                if len(parts)==8 and parts[4:7]==['reason','terminal','result64']:
+                    value=decode(parts[7])
+                    if value!=self.root['result'] or value.get('status')!='terminal':raise ValueError('False terminal claim')
                 self._complete(None,'');return
-            if parts[3:]==['none','reason','stopped']:self._complete(None,'No completed iteration (stopped)');return
             raise ValueError('Playable engine returned no valid move')
         raise ValueError('Unexpected engine output in '+self.phase)
     def _begin_search(self):
@@ -201,7 +221,7 @@ class Client(QObject):
     def _next_option(self):
         if self._pending_options:
             name,value=self._pending_options[0];self._send(f'setoption name {name} value {value}');self.timer.start(2000);return
-        self.phase='newgame';self._send('newgame');self.timer.start(5000)
+        self.phase='position';self._send('position state64 '+encode(self.pending['state']));self.timer.start(5000)
     def _validate_async(self,kind,value):
         self._submit((self.generation,self.active),kind,self.root,value,self.requested)
     def _submit(self,token,kind,state,value,requested):
@@ -240,7 +260,7 @@ class Client(QObject):
         self.info_groups[(v['id'],v['depth'],v['multipv'])]=v
         # Keep latest bounded depth/rank groups, not an unbounded search log.
         if len(self.info_groups)>160:self.info_groups={k:self.info_groups[k] for k in sorted(self.info_groups,key=lambda k:(k[1],k[2]),reverse=True)[:160]}
-        self.infoReceived.emit(EngineInfo(v['depth'],v['nodes'],v['time_ms'],score['value'],score['kind'],value['notations'],v['multipv'],engine_id=self.metadata.get('name',''),session_id=token,position_id=position_id(self.root),score_perspective=score['perspective'],root_side=self.root['position']['to_move'],nps=(v['nodes']*1000//v['time_ms'] if v['time_ms'] else None),bound=v['bound']))
+        self.infoReceived.emit(EngineInfo(v['depth'],v['nodes'],v['time_ms'],score['value'],score['kind'],value['notations'],value.get('moves',[]),v['multipv'],engine_id=self.metadata.get('name',''),session_id=token,position_id=getattr(self,'root_pid',None) or position_id(self.root),score_perspective=score['perspective'],root_side=self.root['position']['to_move'],nps=(v['nodes']*1000//v['time_ms'] if v['time_ms'] else None),bound=v['bound']))
         if self.phase=='search' and self.latest_info and len(self.jobs)<2:
             rank=next(iter(self.latest_info));self._validate_async('info',self.latest_info.pop(rank))
     def _complete(self,move,text):

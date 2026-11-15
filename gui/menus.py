@@ -7,36 +7,52 @@ class MenuActions:
         mb.setStyleSheet(self.menu_bar_style)
 
         # 1. FILE (F)
-        file_menu = mb.addMenu("File(F)")
-        self.act_new = QAction("New(N)", self)
+        file_menu = mb.addMenu("&Tệp (File)")
+
+        self.act_open = file_menu.addAction("Nhập Kỳ phổ (TXT / LPGF / LPPN)...", self._open_record)
+        self.act_open.setObjectName("importAction")
+        self.act_open.setShortcut(QKeySequence("Ctrl+O"))
+
+        self.export_as_menu = file_menu.addMenu("Xuất kỳ phổ (Export As)...")
+        self.exportAsMenu_ = self.export_as_menu
+        act_exp_20 = self.export_as_menu.addAction("Xuất thành LPGF 2.0 (*.lpgf)...", self._export_lpgf_20)
+        act_exp_20.setObjectName("exportLpgf20Action")
+        act_exp_txt = self.export_as_menu.addAction("Xuất thành TXT (*.txt)...", self._export_txt)
+        act_exp_txt.setObjectName("exportTxtAction")
+
+        self.act_export_copy = file_menu.addAction("Xuất bản sao gốc...", self._export_record_copy)
+        self.act_export_copy.setObjectName("exportCopyAction")
+
+        self.lppn_menu = file_menu.addMenu("LPPN (Thế cờ / SFEN)")
+        self.lppn_menu.addAction("Xuất LPPN (*.lppn)...", self._export_lppn)
+        self.lppn_menu.addAction("Sao chép LPPN (Copy)", self._copy_lppn)
+        self.lppn_menu.addAction("Dán LPPN (Paste)", self._paste_lppn)
+
+        file_menu.addAction("Xuất hình ảnh bàn cờ (Image)...", self._export_position_image)
+
+        file_menu.addSeparator()
+
+        self.act_new = QAction("Tạo mới ván đấu / Khởi tạo lại", self)
+        self.act_new.setObjectName("resetBoardAction")
+        self.act_new.setShortcut(QKeySequence("Ctrl+N"))
         self.act_new.triggered.connect(self._on_action_new)
         file_menu.addAction(self.act_new)
 
-        open_menu = file_menu.addMenu("Open")
-        self.act_open = open_menu.addAction("TXT...", lambda: self._open_record('txt'))
-        self.act_open.setShortcut(QKeySequence("Ctrl+O"))
-        open_menu.addAction("LPGF...", lambda: self._open_record('lpgf'))
-        open_menu.addAction("LPPN...", self._open_lppn)
-        open_menu.addAction("Paste LPPN", self._paste_lppn)
-        self.act_save = file_menu.addAction("Save", self._on_action_save)
+        self.act_save = file_menu.addAction("Lưu tạm thời phiên làm việc (Save Session)", self._on_action_save)
         self.act_save.setShortcut(QKeySequence("Ctrl+S"))
-        self.act_save_as = file_menu.addAction("Save As...", self._on_action_save_as)
+        self.act_save_as = file_menu.addAction("Lưu ván đấu thành file khác (Save As)...", self._on_action_save_as)
         self.act_save_as.setShortcut(QKeySequence("Ctrl+Shift+S"))
-        export_menu = file_menu.addMenu("Export")
-        export_menu.addAction("Export LPGF...", self._export_lpgf)
-        export_menu.addAction("Export LPPN...", self._export_lppn)
-        export_menu.addAction("Copy LPPN", self._copy_lppn)
-        export_menu.addAction("Export Position Image...", self._export_position_image)
-        file_menu.addAction("Recover Previous Session...", self._recover_previous_session)
+        file_menu.addAction("Khôi phục phiên làm việc trước...", self._recover_previous_session)
+
         file_menu.addSeparator()
-        act_exit = file_menu.addAction("Exit", self.close)
+        act_exit = file_menu.addAction("Thoát (Exit)", self.close)
         act_exit.setShortcut(QKeySequence("Alt+F4"))
 
         # 2. EDIT (E)
         edit_menu = mb.addMenu("Edit(E)")
         undo_tree = edit_menu.addAction('Undo tree edit',self._undo_tree_edit)
         undo_tree.setShortcut(QKeySequence('Ctrl+Alt+Z'))
-        edit_menu.addAction('Enter moves from this position',lambda:self.board.set_moves_enabled(not self.is_game_active and not self._review_active and not self.game.is_over()))
+        edit_menu.addAction('Enter moves from this position', lambda: (setattr(self, '_position_editable', True), self.board.set_moves_enabled(not self.is_game_active and not self._review_active and not self.game.is_over())))
         edit_menu.addAction('Cancel force variation',lambda:self._set_force_variation(self.game.current_node,False))
 
         # 3. VIEW (V) - MENU QUẢN LÝ ẨN / HIỆN CÁC KHUNG
@@ -72,38 +88,48 @@ class MenuActions:
         self.act_view_toolbar.toggled.connect(self.board.set_toolbar_visible)
         view_menu.addAction(self.act_view_toolbar)
 
-        # (b) Bật / Tắt Biểu đồ đánh giá thế trận (Graph View)
-        self.act_view_graph = self.evaluation_dock.toggleViewAction()
-        self.act_view_graph.setText("Display Evaluation (Evaluation Graph)")
-        view_menu.addAction(self.act_view_graph)
-
-        # (c) Bật / Tắt Nhãn số định vị tọa độ (a-i, 1-9)
+        # (b) Bật / Tắt Nhãn số định vị tọa độ (a-i, 1-9)
         self.act_view_coords = QAction("Coordinates(C)", self)
         self.act_view_coords.setCheckable(True)
         self.act_view_coords.setChecked(True)
         self.act_view_coords.toggled.connect(self.board.set_show_coordinates)
         view_menu.addAction(self.act_view_coords)
 
-        # (d) Bật / Tắt Bảng kỳ phổ bên phải
+        # (c) Bật / Tắt mũi tên đề xuất Engine trên bàn cờ
+        self.act_toggle_arrows = QAction("Mũi tên đề xuất Engine (MultiPV Arrows)", self)
+        self.act_toggle_arrows.setCheckable(True)
+        self.act_toggle_arrows.setChecked(getattr(self, "show_arrows", True))
+        self.act_toggle_arrows.toggled.connect(self._on_toggle_engine_arrows)
+        view_menu.addAction(self.act_toggle_arrows)
+
+        view_menu.addSeparator()
+
+        # (d) Gộp toàn bộ các cửa sổ / Dock trực tiếp vào View(V), không trùng lặp
+        self.act_view_winrate = self.winrate_dock.toggleViewAction()
+        self.act_view_winrate.setText("Winning percentage(W)")
+        self.act_view_board = self.board_dock.toggleViewAction()
         self.act_view_notation = self.notation_dock.toggleViewAction()
-        view_menu.addAction(self.act_view_notation)
-
-        # (e) Bật / Tắt thanh phần trăm thắng ở phía trên
-        self.act_view_winrate = QAction("Winning percentage(W)", self)
-        self.act_view_winrate.setCheckable(True)
-        self.act_view_winrate.setChecked(True)
-        self.act_view_winrate.toggled.connect(self.win_percentage.setVisible)
-        view_menu.addAction(self.act_view_winrate)
-
-        # (f) Bật / Tắt bảng thông tin suy nghĩ của engine
+        self.act_view_graph = self.evaluation_dock.toggleViewAction()
+        self.act_view_graph.setText("Display Evaluation (Evaluation Graph)")
         self.act_view_thinking = self.thinking_dock.toggleViewAction()
-        view_menu.addAction(self.act_view_thinking)
+        self.act_view_candidates = self.candidates_dock.toggleViewAction()
+        self.act_view_possible_moves = self.possible_moves_dock.toggleViewAction()
+        self.act_view_consider = self.consider_dock.toggleViewAction()
 
-        windows = view_menu.addMenu("Windows")
-        for dock in self.workspace_docks + self.engine_docks:
-            action = dock.toggleViewAction()
-            windows.addAction(action)
+        dock_actions = (
+            (self.winrate_dock, self.act_view_winrate),
+            (self.board_dock, self.act_view_board),
+            (self.notation_dock, self.act_view_notation),
+            (self.evaluation_dock, self.act_view_graph),
+            (self.thinking_dock, self.act_view_thinking),
+            (self.candidates_dock, self.act_view_candidates),
+            (self.possible_moves_dock, self.act_view_possible_moves),
+            (self.consider_dock, self.act_view_consider),
+        )
+        for dock, action in dock_actions:
+            view_menu.addAction(action)
             action.triggered.connect(lambda checked, d=dock: self._show_workspace_panel(d, checked))
+
         view_menu.addSeparator()
         view_menu.addAction("Save Layout", lambda: self._save_layout(explicit=True))
         view_menu.addAction("Reset Layout", self._reset_layout)

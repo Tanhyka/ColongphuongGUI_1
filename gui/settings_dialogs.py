@@ -387,19 +387,19 @@ class EngineListDialog(QDialog):
 
 
 class _TimeBox(QGroupBox):
-    def __init__(self, title: str = "Time settings", parent=None):
+    def __init__(self, title: str = "", parent=None):
         super().__init__(title, parent)
         grid = QGridLayout(self)
-        grid.setContentsMargins(8, 6, 8, 6)
-        grid.setHorizontalSpacing(5)
-        grid.setVerticalSpacing(3)
-        self.hours = QSpinBox(); self.hours.setRange(0, 99)
-        self.minutes = QSpinBox(); self.minutes.setRange(0, 59); self.minutes.setValue(10)
-        self.countdown = QSpinBox(); self.countdown.setRange(0, 999); self.countdown.setValue(30)
+        grid.setContentsMargins(8, 8, 8, 8)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(5)
+        self.hours = QSpinBox(); self.hours.setRange(0, 99); self.hours.setMinimumHeight(23)
+        self.minutes = QSpinBox(); self.minutes.setRange(0, 59); self.minutes.setValue(10); self.minutes.setMinimumHeight(23)
+        self.countdown = QSpinBox(); self.countdown.setRange(0, 999); self.countdown.setValue(30); self.countdown.setMinimumHeight(23)
         grid.addWidget(QLabel("Time"), 0, 0)
         grid.addWidget(self.hours, 0, 1); grid.addWidget(QLabel("H"), 0, 2)
         grid.addWidget(self.minutes, 0, 3); grid.addWidget(QLabel("M"), 0, 4)
-        grid.addWidget(QLabel("Countdown"), 1, 0)
+        grid.addWidget(QLabel("Byo yomi"), 1, 0)
         grid.addWidget(self.countdown, 1, 1); grid.addWidget(QLabel("S"), 1, 2)
 
 
@@ -414,8 +414,8 @@ class GameSettingsDialog(QDialog):
     def __init__(self, parent=None, *, allow_start: bool = True):
         super().__init__(parent)
         self.setWindowTitle("Game")
-        self.setMinimumSize(640, 555)
-        self.resize(680, 610)
+        self.setMinimumSize(680, 620)
+        self.resize(720, 660)
         self.start_requested = False
         self._allow_start = bool(allow_start)
 
@@ -451,35 +451,67 @@ class GameSettingsDialog(QDialog):
         # Time controls
         # --------------------------------------------------------------
         times = QHBoxLayout()
-        times.setSpacing(6)
-        self.cam_time = _TimeBox("Time settings")
+        times.setSpacing(8)
 
-        self.xanh_time_wrap = QGroupBox()
-        xanh_outer = QVBoxLayout(self.xanh_time_wrap)
-        xanh_outer.setContentsMargins(7, 3, 7, 6)
+        cam_time_col = QVBoxLayout()
+        cam_time_col.setContentsMargins(0, 0, 0, 0)
+        cam_time_col.setSpacing(4)
+        self.cam_time_header = QLabel("Time settings")
+        self.cam_time_header.setMinimumHeight(22)
+        self.cam_time = _TimeBox("")
+        cam_time_col.addWidget(self.cam_time_header)
+        cam_time_col.addWidget(self.cam_time)
+
+        xanh_time_col = QVBoxLayout()
+        xanh_time_col.setContentsMargins(0, 0, 0, 0)
+        xanh_time_col.setSpacing(4)
         self.separate_xanh_time = QCheckBox("Xanh Time settings")
+        self.separate_xanh_time.setMinimumHeight(22)
         self.xanh_time = _TimeBox("")
         self.xanh_time.setEnabled(False)
         self.separate_xanh_time.toggled.connect(self.xanh_time.setEnabled)
-        xanh_outer.addWidget(self.separate_xanh_time)
-        xanh_outer.addWidget(self.xanh_time)
+        xanh_time_col.addWidget(self.separate_xanh_time)
+        xanh_time_col.addWidget(self.xanh_time)
 
-        times.addWidget(self.cam_time, 1)
-        times.addWidget(self.xanh_time_wrap, 1)
+        times.addLayout(cam_time_col, 1)
+        times.addLayout(xanh_time_col, 1)
         root.addLayout(times)
 
-        # Independent finite engine budget; the live clock may lower this cap.
+        # Independent finite engine thinking time bounds (optional min & max per move).
         engine_budget_row = QHBoxLayout()
-        engine_budget_row.addWidget(QLabel("Engine thinking time / move"))
+        engine_budget_row.setSpacing(10)
+
+        self.use_max_engine_time = QCheckBox("Max engine thinking time / move")
+        self.use_max_engine_time.setChecked(True)
         self.engine_move_time_ms = QSpinBox()
-        self.engine_move_time_ms.setRange(100, 60000)
+        self.engine_move_time_ms.setRange(100, 300000)
         self.engine_move_time_ms.setSingleStep(100)
+        self.engine_move_time_ms.setValue(1000)
+        self.engine_move_time_ms.setMinimumHeight(23)
         self.engine_move_time_ms.setSuffix(" ms")
         self.engine_move_time_ms.setToolTip(
-            "Maximum thinking time for one engine move. Separate from game clocks "
-            "and Engine Workspace finite analysis time."
+            "Maximum thinking time for one engine move. Uncheck to let the engine use time according to the game clock."
         )
+        self.use_max_engine_time.toggled.connect(self.engine_move_time_ms.setEnabled)
+
+        self.use_min_engine_time = QCheckBox("Min engine thinking time / move")
+        self.use_min_engine_time.setChecked(False)
+        self.engine_min_time_ms = QSpinBox()
+        self.engine_min_time_ms.setRange(0, 60000)
+        self.engine_min_time_ms.setSingleStep(100)
+        self.engine_min_time_ms.setValue(500)
+        self.engine_min_time_ms.setMinimumHeight(23)
+        self.engine_min_time_ms.setSuffix(" ms")
+        self.engine_min_time_ms.setEnabled(False)
+        self.engine_min_time_ms.setToolTip(
+            "Minimum thinking time before an engine move is played so the engine does not respond too fast."
+        )
+        self.use_min_engine_time.toggled.connect(self.engine_min_time_ms.setEnabled)
+
+        engine_budget_row.addWidget(self.use_max_engine_time)
         engine_budget_row.addWidget(self.engine_move_time_ms)
+        engine_budget_row.addWidget(self.use_min_engine_time)
+        engine_budget_row.addWidget(self.engine_min_time_ms)
         engine_budget_row.addStretch(1)
         root.addLayout(engine_budget_row)
 
@@ -521,16 +553,18 @@ class GameSettingsDialog(QDialog):
         self.continuous_box.setCheckable(True)
         self.continuous_box.setChecked(False)
         cg = QGridLayout(self.continuous_box)
-        cg.setContentsMargins(8, 6, 8, 6)
-        cg.setHorizontalSpacing(6)
-        cg.setVerticalSpacing(2)
+        cg.setContentsMargins(8, 10, 8, 8)
+        cg.setHorizontalSpacing(8)
+        cg.setVerticalSpacing(5)
         self.continuous_games = QSpinBox()
         self.continuous_games.setRange(1, 9999)
         self.continuous_games.setValue(1)
+        self.continuous_games.setMinimumHeight(23)
         self.draw_moves = QCheckBox("Draw after plies")
         self.draw_move_limit = QSpinBox()
         self.draw_move_limit.setRange(1, 9999)
         self.draw_move_limit.setValue(256)
+        self.draw_move_limit.setMinimumHeight(23)
         self.together_notation = QCheckBox("Together notation in one")
         self.after_replacement = QCheckBox("After replacement")
         self.after_replacement.setChecked(True)
@@ -549,8 +583,8 @@ class GameSettingsDialog(QDialog):
 
         settings_box = QGroupBox("Settings")
         sr = QVBoxLayout(settings_box)
-        sr.setContentsMargins(8, 6, 8, 6)
-        sr.setSpacing(2)
+        sr.setContentsMargins(8, 10, 8, 8)
+        sr.setSpacing(4)
         self.add_thinking_comments = QCheckBox("Add thinking information to comments")
         self.use_piece_sounds = QCheckBox("Use piece sounds")
         self.use_countdown_sounds = QCheckBox("Use countdown sounds")
@@ -558,6 +592,7 @@ class GameSettingsDialog(QDialog):
         self.dont_lose_time = QCheckBox("Don't lose time")
         self.no_sound_engine_engine = QCheckBox("No sound in engine vs engine")
         self.low_priority = QCheckBox("Low priority")
+        self.allow_go_back = QCheckBox("Allow go back to previous move")
         for cb in (
             self.add_thinking_comments,
             self.use_piece_sounds,
@@ -566,6 +601,7 @@ class GameSettingsDialog(QDialog):
             self.dont_lose_time,
             self.no_sound_engine_engine,
             self.low_priority,
+            self.allow_go_back,
         ):
             sr.addWidget(cb)
         sr.addStretch(1)
@@ -726,13 +762,34 @@ class GameSettingsDialog(QDialog):
         self.xanh_time.hours.setValue(int(s.value("game/xanh_hours", 0)))
         self.xanh_time.minutes.setValue(int(s.value("game/xanh_minutes", 10)))
         self.xanh_time.countdown.setValue(int(s.value("game/xanh_countdown", 30)))
+        use_max = s.value("game/use_max_engine_time", True, type=bool)
+        self.use_max_engine_time.setChecked(use_max)
         self.engine_move_time_ms.setValue(int(s.value("game/engine_move_time_ms", 1000)))
+        self.engine_move_time_ms.setEnabled(use_max)
+        use_min = s.value("game/use_min_engine_time", False, type=bool)
+        self.use_min_engine_time.setChecked(use_min)
+        self.engine_min_time_ms.setValue(int(s.value("game/engine_min_time_ms", 500)))
+        self.engine_min_time_ms.setEnabled(use_min)
 
         use_this = s.value("game/start_this_position", False, type=bool)
         self.radio_this.setChecked(use_this)
         self.radio_even.setChecked(not use_this)
         self.continuous_box.setChecked(s.value("game/continuous", False, type=bool))
         self.continuous_games.setValue(int(s.value("game/continuous_games", 1)))
+        self.draw_moves.setChecked(s.value("game/draw_moves", False, type=bool))
+        self.draw_move_limit.setValue(int(s.value("game/draw_move_limit", 256)))
+        self.together_notation.setChecked(s.value("game/together_notation", False, type=bool))
+        self.after_replacement.setChecked(s.value("game/after_replacement", True, type=bool))
+        self.do_not_quit_engine.setChecked(s.value("game/do_not_quit_engine", False, type=bool))
+        self.write_result_comment.setChecked(s.value("game/write_result_comment", False, type=bool))
+        self.add_thinking_comments.setChecked(s.value("game/add_thinking_comments", False, type=bool))
+        self.use_piece_sounds.setChecked(s.value("game/use_piece_sounds", False, type=bool))
+        self.use_countdown_sounds.setChecked(s.value("game/use_countdown_sounds", False, type=bool))
+        self.display_thinking_human.setChecked(s.value("game/display_thinking_human", False, type=bool))
+        self.dont_lose_time.setChecked(s.value("game/dont_lose_time", False, type=bool))
+        self.no_sound_engine_engine.setChecked(s.value("game/no_sound_engine_engine", False, type=bool))
+        self.low_priority.setChecked(s.value("game/low_priority", False, type=bool))
+        self.allow_go_back.setChecked(s.value("game/allow_go_back", False, type=bool))
         self.autosave.setChecked(s.value("game/autosave", False, type=bool))
         self.autosave_path.setText(str(s.value("game/autosave_path", "")))
 
@@ -782,7 +839,10 @@ class GameSettingsDialog(QDialog):
             "cam_hours": self.cam_time.hours.value(),
             "cam_minutes": self.cam_time.minutes.value(),
             "cam_countdown": self.cam_time.countdown.value(),
+            "use_max_engine_time": self.use_max_engine_time.isChecked(),
             "engine_move_time_ms": self.engine_move_time_ms.value(),
+            "use_min_engine_time": self.use_min_engine_time.isChecked(),
+            "engine_min_time_ms": self.engine_min_time_ms.value(),
             "separate_xanh_time": separate,
             "xanh_hours": self.xanh_time.hours.value() if separate else self.cam_time.hours.value(),
             "xanh_minutes": self.xanh_time.minutes.value() if separate else self.cam_time.minutes.value(),
@@ -803,6 +863,7 @@ class GameSettingsDialog(QDialog):
             "dont_lose_time": self.dont_lose_time.isChecked(),
             "no_sound_engine_engine": self.no_sound_engine_engine.isChecked(),
             "low_priority": self.low_priority.isChecked(),
+            "allow_go_back": self.allow_go_back.isChecked(),
             "autosave": self.autosave.isChecked(),
             "autosave_path": self.autosave_path.text().strip(),
         }

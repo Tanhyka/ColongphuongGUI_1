@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import QHBoxLayout,QPushButton,QSpinBox,QLabel,QTableWidget
 
 class ConsiderActions:
     def _init_consider(self):
-        self.consider_panel.setMinimumSize(500,260)
+        self.consider_panel.setMinimumSize(240, 140)
         layout=self.consider_panel.layout()
         while layout.count():
             item=layout.takeAt(0)

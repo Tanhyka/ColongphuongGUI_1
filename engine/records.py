@@ -1,45 +1,83 @@
 """Transactional record IO, preserving existing supported metadata and raw records."""
-import json,re,uuid,hashlib
+import json
+import re
+import uuid
+import hashlib
 from .game import Game
-from .notation import LPGFNotation,HEADER_KEYS
-from .session import encode_game,atomic_write
+from .notation import LPGFNotation, HEADER_KEYS, IllegalRecordMoveError
+from .session import encode_game, atomic_write
+
 
 def history_signature(game):
-    data=encode_game(game);data.pop('selected',None)
-    return json.dumps(data,ensure_ascii=False,sort_keys=True)
+    data = encode_game(game)
+    data.pop('selected', None)
+    return json.dumps(data, ensure_ascii=False, sort_keys=True)
 
-def load_record(content,filename=''):
-    if not content.strip():raise ValueError('The record is empty.')
-    if not (re.search(r'(?im)^\s*(#lpgf\b|#position\s|\d+\.)',content) or 'Kỳ Phổ Game Đấu' in content):
+
+def load_record(content, filename='', *, truncate_on_illegal=False):
+    if not content.strip():
+        raise ValueError('The record is empty.')
+    if not (re.search(r'(?im)^\s*(#lpgf\b|#position\s|\d+[\.\s])', content) or 'Kỳ Phổ Game Đấu' in content):
         raise ValueError('No LPGF header, position or numbered moves were found.')
-    if re.match(r'^\s*#lpgf\s+2\.0\s*\n',content):
+
+    # Legacy provisional JSON tree format
+    if re.match(r'^\s*#lpgf\s+2\.0\s*\{', content):
         from .tree_record import load_tree
-        game,meta=load_tree(content.lstrip())
+        game, meta = load_tree(content.lstrip())
     else:
-        if re.search(r'(?im)^#lpgf\s+(?:version=)?(?!1\.[01]\b)\d+\.\d+',content):raise ValueError('Unsupported LPGF version')
-        game=Game();meta=LPGFNotation.load_record(content,game,filename)
+        game = Game()
+        try:
+            meta = LPGFNotation.load_record(content, game, filename, truncate_on_illegal=truncate_on_illegal)
+        except IllegalRecordMoveError as exc:
+            if exc.game is not None:
+                exc.game.game_id = hashlib.sha256(content.encode('utf8')).hexdigest()
+                for i, node in enumerate(exc.game.nodes()):
+                    node.node_id = uuid.uuid5(uuid.NAMESPACE_URL, exc.game.game_id + ':' + str(i)).hex
+                if '#compat legacy-turnabout=1' in content or any(n.move and n.move.rotate_after == 2 for n in exc.game.nodes()):
+                    exc.metadata['legacy_turnabout'] = True
+                exc.metadata.update(
+                    original_text=content,
+                    original_format=LPGFNotation.detect_format(content, filename),
+                    signature=history_signature(exc.game),
+                )
+                exc.game._truncated_illegal = True
+            raise exc
+
         # Stable, repeatable legacy identity without altering the original record.
-        game.game_id=hashlib.sha256(content.encode('utf8')).hexdigest()
-        for i,node in enumerate(game.nodes()):node.node_id=uuid.uuid5(uuid.NAMESPACE_URL,game.game_id+':'+str(i)).hex
-        if '#compat legacy-turnabout=1' in content or any(n.move and n.move.rotate_after==2 for n in game.nodes()):meta['legacy_turnabout']=True
-    meta.update(original_text=content,original_format=LPGFNotation.detect_format(content,filename),signature=history_signature(game))
-    return game,meta
+        game.game_id = hashlib.sha256(content.encode('utf8')).hexdigest()
+        for i, node in enumerate(game.nodes()):
+            node.node_id = uuid.uuid5(uuid.NAMESPACE_URL, game.game_id + ':' + str(i)).hex
+        if '#compat legacy-turnabout=1' in content or any(n.move and n.move.rotate_after == 2 for n in game.nodes()):
+            meta['legacy_turnabout'] = True
 
-def export_record(game,metadata=None,player_cam='Cam',player_xanh='Xanh'):
-    meta=metadata or {};original=meta.get('original_text');unchanged=meta.get('signature')==history_signature(game)
-    if original and unchanged and meta.get('original_format')=='lpgf' and not original.lstrip().startswith('#lpgf 2.0'):
-        text=original
-        for key,value in [('Kỳ Thủ Cầm Cam:',player_cam),('Kỳ Thủ Cầm Xanh:',player_xanh)]:
-            if re.search('(?m)^'+re.escape(key),text):text=re.sub('(?m)^'+re.escape(key)+r'[^\r\n]*',lambda m:key+' '+value,text)
-        return text
-    from .tree_record import export_tree
-    metadata=dict(meta,player_cam=player_cam,player_xanh=player_xanh)
-    if original and not original.lstrip().startswith('#lpgf 2.0'):
-        metadata['legacy_source_text']=original
-    return export_tree(game,metadata)
+    meta.update(
+        original_text=content,
+        original_format=LPGFNotation.detect_format(content, filename),
+        signature=history_signature(game),
+    )
+    return game, meta
 
 
-def write_record(path,game,metadata=None,**names):
-    content=export_record(game,metadata,**names)
-    atomic_write(path,content)
+def export_record(game, metadata=None, player_cam=None, player_xanh=None, format_type=None):
+    meta = metadata or {}
+    cam = player_cam or meta.get('player_cam') or 'Cam'
+    xanh = player_xanh or meta.get('player_xanh') or 'Xanh'
+    fmt = (format_type or meta.get('target_format') or '').lower().strip().lstrip('.')
+
+    # Explicit format requests (all LPGF exports now write 2.0; 1.1 is import-only)
+    if fmt == 'txt':
+        return LPGFNotation.export_txt(game, player_cam=cam, player_xanh=xanh, metadata=meta)
+
+    return LPGFNotation.export_lpgf(game, player_cam=cam, player_xanh=xanh, metadata=meta, version="2.0")
+
+
+def write_record(path, game, metadata=None, format_type=None, **names):
+    if format_type is None:
+        p = str(path).lower()
+        if p.endswith('.txt'):
+            format_type = 'txt'
+        elif p.endswith('.lpgf'):
+            format_type = 'lpgf20'
+    content = export_record(game, metadata, format_type=format_type, **names)
+    atomic_write(path, content)
     return content

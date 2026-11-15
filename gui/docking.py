@@ -1,54 +1,120 @@
-"""Native panel ownership. Board V2 cluster remains a single dock child."""
+"""Native panel ownership with full dock nesting, splitting, floating, and tabifying."""
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QDockWidget,QMainWindow,QWidget,QVBoxLayout,QLabel
+from PyQt6.QtWidgets import QDockWidget, QMainWindow, QWidget, QVBoxLayout, QLabel
+
 
 class DockActions:
-    # STEP 7 integration point only: no Notation Tree widget or action yet.
     notation_tree_factory = None
 
-    def _new_dock(self,owner,name,title,widget):
-        dock=QDockWidget(title,owner);dock.setObjectName(name)
+    def _new_dock(self, owner, name, title, widget):
+        dock = QDockWidget(title, owner)
+        dock.setObjectName(name)
         dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
-        dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable | QDockWidget.DockWidgetFeature.DockWidgetMovable | QDockWidget.DockWidgetFeature.DockWidgetFloatable)
+        dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetClosable
+            | QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
         dock.setWidget(widget)
+        dock.topLevelChanged.connect(lambda floating, d=dock: self._on_dock_top_level_changed(d, floating))
         return dock
 
+    def _on_dock_top_level_changed(self, dock: QDockWidget, floating: bool):
+        dock.setMinimumSize(180, 70)
+        dock.setMaximumSize(16777215, 16777215)
+        if floating:
+            if dock.width() < 260 or dock.height() < 90:
+                dock.resize(max(dock.width(), 420), max(dock.height(), 180))
+        self._schedule_cluster_update()
+
     def _setup_docks(self):
-        old=self.takeCentralWidget()
-        if old:old.deleteLater()
+        old = self.takeCentralWidget()
+        if old:
+            old.deleteLater()
+
+        # Enable free docking: nesting, tabifying, animated docks (omit GroupedDragging
+        # so any single dock or tab can detach cleanly into its own floating window).
         self.setDockNestingEnabled(True)
-        self.setDockOptions(QMainWindow.DockOption.AllowNestedDocks | QMainWindow.DockOption.AllowTabbedDocks | QMainWindow.DockOption.AnimatedDocks)
-        self.top_left_container.setMinimumSize(590,390)
-        self.notation_container.setMinimumWidth(300)
-        self.engine_workspace=QMainWindow(self);self.engine_workspace.setObjectName('engine_workspace_host');self.engine_workspace.setDockNestingEnabled(True)
-        self.consider_panel=QWidget();layout=QVBoxLayout(self.consider_panel)
-        layout.addWidget(QLabel('Consider'));label=QLabel('Workspace reserved for STEP 6. No analysis is running.');label.setWordWrap(True);layout.addWidget(label);layout.addStretch()
-        self.thinking_dock=self._new_dock(self.engine_workspace,'thinking_information','Thinking Information',self.thinking_information)
-        self.consider_dock=self._new_dock(self.engine_workspace,'consider','Consider',self.consider_panel)
-        self.engine_workspace.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea,self.thinking_dock)
-        self.engine_workspace.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea,self.consider_dock)
-        self.engine_workspace.tabifyDockWidget(self.thinking_dock,self.consider_dock);self.thinking_dock.raise_()
-        self.board_dock=self._new_dock(self,'board_cluster','Board',self.top_left_container)
-        self.notation_dock=self._new_dock(self,'notation','Notation Panel',self.notation_container)
-        self.evaluation_dock=self._new_dock(self,'evaluation','Evaluation Graph',self.graph_view)
-        self.engine_dock=self._new_dock(self,'engine_workspace','Engine Workspace',self.engine_workspace)
-        self.workspace_docks=[self.board_dock,self.notation_dock,self.evaluation_dock,self.engine_dock]
-        self.engine_docks=[self.thinking_dock,self.consider_dock]
+        self.setDockOptions(
+            QMainWindow.DockOption.AllowNestedDocks
+            | QMainWindow.DockOption.AllowTabbedDocks
+            | QMainWindow.DockOption.AnimatedDocks
+        )
+
+        self.notation_container.setMinimumWidth(200)
+
+        # Consider panel
+        self.consider_panel = QWidget()
+        c_layout = QVBoxLayout(self.consider_panel)
+        c_layout.addWidget(QLabel("<b>Phân tích & Tùy chọn (Consider)</b>"))
+        label = QLabel("Khung công cụ phân tích nâng cao và xem trước biến thế.")
+        label.setWordWrap(True)
+        c_layout.addWidget(label)
+        c_layout.addStretch()
+
+        # All docks as top-level docks directly on MainWindow
+        self.winrate_dock = self._new_dock(self, "win_probability", "Tỷ lệ thắng (Win Probability)", self.win_percentage)
+        self.board_dock = self._new_dock(self, "board_cluster", "Bàn cờ (Board)", self.board_row_widget)
+        self.notation_dock = self._new_dock(self, "notation", "Kỳ phổ (Notation)", self.notation_container)
+        self.evaluation_dock = self._new_dock(self, "evaluation", "Đồ thị đánh giá (Evaluation)", self.graph_view)
+        self.thinking_dock = self._new_dock(self, "thinking_information", "Phân tích Engine (Analysis)", self.thinking_information)
+        self.candidates_dock = self._new_dock(self, "engine_candidates", "Nước đi đề xuất (Engine Top 5)", self.candidates_widget)
+        self.possible_moves_dock = self._new_dock(self, "possible_moves", "Nước đi hợp lệ (Possible moves)", self.possible_moves_widget)
+        self.consider_dock = self._new_dock(self, "consider", "Consider", self.consider_panel)
+
+        # Aliases for compatibility
+        self.engine_dock = self.thinking_dock
+        self.workspace_docks = [
+            self.winrate_dock,
+            self.board_dock,
+            self.notation_dock,
+            self.evaluation_dock,
+            self.thinking_dock,
+            self.candidates_dock,
+            self.possible_moves_dock,
+            self.consider_dock,
+        ]
+        self.all_docks = self.workspace_docks
+        self.engine_docks = [self.thinking_dock, self.candidates_dock, self.consider_dock]
+
         self._default_docks()
 
     def _default_docks(self):
-        for dock in self.workspace_docks:
-            dock.setFloating(False);self.removeDockWidget(dock)
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea,self.board_dock)
-        self.splitDockWidget(self.board_dock,self.notation_dock,Qt.Orientation.Horizontal)
-        self.splitDockWidget(self.board_dock,self.evaluation_dock,Qt.Orientation.Vertical)
-        self.splitDockWidget(self.evaluation_dock,self.engine_dock,Qt.Orientation.Horizontal)
-        for dock in self.engine_docks:
-            dock.setFloating(False);self.engine_workspace.removeDockWidget(dock)
-            self.engine_workspace.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea,dock);dock.show()
-        self.engine_workspace.tabifyDockWidget(self.thinking_dock,self.consider_dock);self.thinking_dock.raise_()
-        for dock in self.workspace_docks:dock.show()
-        self.resizeDocks([self.board_dock,self.notation_dock],[900,300],Qt.Orientation.Horizontal)
-        self.resizeDocks([self.board_dock,self.evaluation_dock],[620,180],Qt.Orientation.Vertical)
-        self.resizeDocks([self.evaluation_dock,self.engine_dock],[600,600],Qt.Orientation.Horizontal)
+        """Standard 2-column balanced layout with independent Win Probability & Board docks."""
+        self.setCorner(Qt.Corner.BottomLeftCorner, Qt.DockWidgetArea.BottomDockWidgetArea)
+        self.setCorner(Qt.Corner.BottomRightCorner, Qt.DockWidgetArea.BottomDockWidgetArea)
+
+        for dock in self.all_docks:
+            dock.setFloating(False)
+            self.removeDockWidget(dock)
+
+        # Left area: Win Probability above Board
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.winrate_dock)
+
+        # Notation beside Left area
+        self.splitDockWidget(self.winrate_dock, self.notation_dock, Qt.Orientation.Horizontal)
+
+        # Board below Win Probability
+        self.splitDockWidget(self.winrate_dock, self.board_dock, Qt.Orientation.Vertical)
+
+        # Evaluation below Board
+        self.splitDockWidget(self.board_dock, self.evaluation_dock, Qt.Orientation.Vertical)
+
+        # Engine Thinking beside Evaluation
+        self.splitDockWidget(self.evaluation_dock, self.thinking_dock, Qt.Orientation.Horizontal)
+
+        # Consider, Engine Candidates, Possible Moves tabified with Thinking
+        self.tabifyDockWidget(self.thinking_dock, self.candidates_dock)
+        self.tabifyDockWidget(self.thinking_dock, self.possible_moves_dock)
+        self.tabifyDockWidget(self.thinking_dock, self.consider_dock)
+        self.thinking_dock.raise_()
+
+        for dock in (self.winrate_dock, self.board_dock, self.notation_dock, self.evaluation_dock, self.thinking_dock, self.consider_dock):
+            dock.show()
+        self.candidates_dock.hide()
+        self.possible_moves_dock.hide()
+
+        self.resizeDocks([self.winrate_dock, self.notation_dock], [850, 320], Qt.Orientation.Horizontal)
+        self.resizeDocks([self.winrate_dock, self.board_dock, self.evaluation_dock], [58, 520, 220], Qt.Orientation.Vertical)
+        self.resizeDocks([self.evaluation_dock, self.thinking_dock], [540, 630], Qt.Orientation.Horizontal)
         self._schedule_cluster_update()

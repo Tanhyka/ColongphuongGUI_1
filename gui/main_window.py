@@ -10,27 +10,33 @@ from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QLayout,
     QMessageBox,
     QFileDialog,
     QInputDialog,
     QDialog,
     QSplitter,
 )
-from PyQt6.QtCore import Qt, QTimer, QEvent
-from PyQt6.QtGui import QAction, QKeySequence
+from PyQt6.QtCore import Qt, QTimer, QEvent, QSize
+from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 
 from engine.game import Game, MoveNode
 from engine.pieces import Player
 from engine.notation import LPGFNotation
 from engine import registry
-from gui.constants import BG, DEFAULT_KYPHO_DIR
+from gui.constants import BG, DEFAULT_KYPHO_DIR, get_default_kypho_dir
 from gui.widgets import KomadaiWidget, PlayerCardWidget, StackInspectorWidget
 from gui.toolbar import ActionToolbar
-from gui.board_canvas import BoardCanvas
+from gui.board_canvas import BoardCanvas, EngineArrowOverlay
 from gui.notation_view import NotationView
 from gui.graph_view import GraphView
 from gui.edit_position import EditPositionDialog
-from gui.analysis_widgets import WinPercentageWidget, ThinkingInformationWidget
+from gui.analysis_widgets import (
+    WinPercentageWidget,
+    ThinkingInformationWidget,
+    PossibleMovesWidget,
+    EngineCandidatesWidget,
+)
 from gui.engine_controller import EngineController
 from gui.match_runtime import MatchClockState, SeriesScore
 from gui.settings_dialogs import (
@@ -109,6 +115,16 @@ from gui.tree_actions import TreeActions
 
 from gui.review_actions import ReviewActions
 
+class _BoardClusterHost(QWidget):
+    """Dock content host whose minimumSizeHint stays flexible while children scale inside."""
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(340, 260)
+
+    def sizeHint(self) -> QSize:
+        return QSize(720, 520)
+
+
 class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, MenuActions, DockActions, LayoutActions, FileActions, RecoveryActions, QMainWindow):
     menu_bar_style = MENU_BAR_STYLE
     """Main window integrating board canvas, player cards, toolbar, notation, and scoped bottom graph."""
@@ -117,6 +133,7 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
         super().__init__()
         self.game = Game()
         self.is_game_active: bool = False
+        self._position_editable: bool = True
         self._document_dirty = False
         self.record_metadata = {}
         self.current_file_path: Optional[str] = None
@@ -124,7 +141,20 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
 
         self.setWindowTitle("ColongphuongGUI - Practice Mode")
         self.resize(1240, 840)
-        self.setStyleSheet(f"QMainWindow {{ background-color: {BG}; }}")
+        self.setStyleSheet(
+            f"QMainWindow {{ background-color: {BG}; }}\n"
+            "QMainWindow::separator { background: #cbd5e1; width: 5px; height: 5px; }\n"
+            "QMainWindow::separator:hover { background: #94a3b8; }\n"
+            "QDockWidget { border: 1px solid #cbd5e1; }\n"
+            "QDockWidget::title {\n"
+            "    background: #d8dee6;\n"
+            "    border-bottom: 1px solid #bfc8d4;\n"
+            "    padding: 5px 8px;\n"
+            "    text-align: left;\n"
+            "    font-weight: 600;\n"
+            "    color: #1e293b;\n"
+            "}\n"
+        )
 
         self._setup_ui()
         self._init_tree_actions()
@@ -144,7 +174,9 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
         self._engine_bestmove_text = ""
         self._engine_mode: str = "idle"
         self._engine_play_move_applied: bool = False
-        self.game_setup_config = {}
+        self._engine_search_started_monotonic: Optional[float] = None
+        self._pending_delayed_engine_move = None
+        self.game_setup_config = self._load_saved_game_setup_config()
 
         # Step 3.3/3.4 match runtime: clocks, robust stop/resign handling,
         # autosave, and continuous game series.
@@ -173,8 +205,21 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
 
         self._update_menu_states()
         self._sync_all()
+        self.board.allow_analysis_after_result = True
+        self._esc_clear_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        self._esc_clear_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._esc_clear_shortcut.activated.connect(self.board._clear_annotations)
+        app_settings = registry.settings()
+        show_arr = bool(app_settings.value("analysis/show_arrows", True, type=bool))
+        arr_cnt = int(app_settings.value("analysis/arrow_count", 3))
+        self.show_arrows = show_arr
+        self.board.set_show_engine_arrows(show_arr)
+        self.board.set_max_engine_arrows(arr_cnt)
+        if hasattr(self, "act_toggle_arrows"):
+            self.act_toggle_arrows.setChecked(show_arr)
         self._init_recovery()
         self._init_layout()
+        self._sync_go_back_button()
 
     def _configure_core_availability(self):
         """GUI rules are bundled in engine/; missing external AI engines are optional."""
@@ -198,8 +243,10 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
             + "\n\nHãy sửa đường dẫn tại Tools → Engine settings."
         )
 
-    def _ensure_default_dir(self):
-        os.makedirs(DEFAULT_KYPHO_DIR, exist_ok=True)
+    def _ensure_default_dir(self) -> str:
+        target = get_default_kypho_dir()
+        os.makedirs(target, exist_ok=True)
+        return target
 
     def _has_game_content(self) -> bool:
         return self.is_game_active or self.game.has_custom_base_position() or bool(self.game.root and self.game.root.children)
@@ -213,11 +260,34 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
             # Analysis is a separate mode; do not let it compete with an active match.
             self.act_analysis.setEnabled(not self.is_game_active)
 
+    def _load_saved_game_setup_config(self) -> dict:
+        s = registry.settings()
+        return {
+            "cam_controller": str(s.value("game/cam_controller", "Human")),
+            "xanh_controller": str(s.value("game/xanh_controller", "Human")),
+            "cam_name": str(s.value("game/cam_name", "")),
+            "xanh_name": str(s.value("game/xanh_name", "")),
+            "cam_hours": int(s.value("game/cam_hours", 0)),
+            "cam_minutes": int(s.value("game/cam_minutes", 10)),
+            "cam_countdown": int(s.value("game/cam_countdown", 30)),
+            "use_max_engine_time": s.value("game/use_max_engine_time", True, type=bool),
+            "engine_move_time_ms": int(s.value("game/engine_move_time_ms", 1000)),
+            "use_min_engine_time": s.value("game/use_min_engine_time", False, type=bool),
+            "engine_min_time_ms": int(s.value("game/engine_min_time_ms", 500)),
+            "separate_xanh_time": s.value("game/separate_xanh_time", False, type=bool),
+            "xanh_hours": int(s.value("game/xanh_hours", 0)),
+            "xanh_minutes": int(s.value("game/xanh_minutes", 10)),
+            "xanh_countdown": int(s.value("game/xanh_countdown", 30)),
+            "allow_go_back": s.value("game/allow_go_back", False, type=bool),
+            "display_thinking_human": s.value("game/display_thinking_human", False, type=bool),
+        }
+
     def _invalidate_match_callbacks(self) -> int:
         self._match_generation += 1
         self._engine_expected_generation = None
         self._engine_expected_player = None
         self._engine_expected_node = None
+        self._pending_delayed_engine_move = None
         return self._match_generation
 
     def _schedule_engine_turn(self, delay_ms: int = 50):
@@ -255,17 +325,53 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
         return entry['path'] if entry else None
 
     def _engine_move_time_ms(self, player: Player) -> int:
-        """Conservative per-move budget, capped by the player's live clock."""
+        """Per-move search budget honoring optional max/min bounds and live clock."""
+        use_max = bool(self.game_setup_config.get("use_max_engine_time", True))
+        use_min = bool(self.game_setup_config.get("use_min_engine_time", False))
         try:
-            requested = max(100, int(self.game_setup_config.get("engine_move_time_ms", 1000)))
+            min_req = max(0, int(self.game_setup_config.get("engine_min_time_ms", 500))) if use_min else 0
         except Exception:
-            requested = 1000
+            min_req = 0
+
         available = self._match_clock.remaining_for(player)
+        if use_max:
+            try:
+                requested = max(100, int(self.game_setup_config.get("engine_move_time_ms", 1000)))
+            except Exception:
+                requested = 1000
+        elif available > 0:
+            main_ms = self._match_clock.main_remaining_for(player)
+            period_ms = self._match_clock.period_for(player)
+            if main_ms > 0:
+                requested = max(1000, main_ms // 20 + period_ms, min_req)
+            else:
+                requested = max(500, available - 300, min_req)
+        else:
+            requested = max(10000, min_req)
+
         if available <= 0:
             return requested
         # Keep a safety margin so GUI/process overhead does not flag the engine.
         safe_cap = max(100, available - 250)
         return min(requested, safe_cap)
+
+    def _effective_min_engine_time_ms(self, player: Player) -> int:
+        if not bool(self.game_setup_config.get("use_min_engine_time", False)):
+            return 0
+        try:
+            min_ms = max(0, int(self.game_setup_config.get("engine_min_time_ms", 500)))
+        except Exception:
+            min_ms = 0
+        if bool(self.game_setup_config.get("use_max_engine_time", True)):
+            try:
+                max_ms = max(100, int(self.game_setup_config.get("engine_move_time_ms", 1000)))
+                min_ms = min(min_ms, max_ms)
+            except Exception:
+                pass
+        available = self._match_clock.remaining_for(player)
+        if available > 0:
+            min_ms = min(min_ms, max(0, available - 250))
+        return max(0, min_ms)
 
     def _refresh_active_game_input(self):
         if not self.is_game_active:
@@ -303,7 +409,10 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
         self._engine_mode = "play"
         self._engine_play_move_applied = False
         self._engine_bestmove_text = ""
+        self._engine_search_started_monotonic = time.monotonic()
         self.clear_thinking_information()
+        if hasattr(self, "candidates_widget"):
+            self.candidates_widget.clear()
         self.board.set_moves_enabled(False)
 
         try:
@@ -451,6 +560,7 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
         self._autosave_file_path = None
         self._orient_for_setup()
         self.is_game_active = True
+        self.board.allow_analysis_after_result = False
         self.board._clear_annotations()
         self.board.reset_transient_state(clear_last_move=True)
 
@@ -494,6 +604,7 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
                 game=self.game,metadata=self.record_metadata,
                 player_cam=self.card_cam.player_name or "Cam",
                 player_xanh=self.card_xanh.player_name or "Xanh",
+                format_type="lpgf20",
             )
             from engine.session import atomic_write
             atomic_write(self._autosave_file_path, content)
@@ -521,7 +632,9 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
         self._clock_timer.stop()
         self._clock_last_monotonic = None
         self.is_game_active = False
-        self.board.set_moves_enabled(False)
+        self._position_editable = True
+        self.board.allow_analysis_after_result = True
+        self.board.set_moves_enabled(not self.game.is_board_terminal())
         self._update_menu_states()
         self._update_runtime_cards()
         self._autosave_current_game(final=True)
@@ -562,7 +675,7 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
         self._clock_last_monotonic = None
         self.is_game_active = False
         self._engine_mode = "idle"
-        if self.engine_controller.running:
+        if self.engine_controller.running and not getattr(self, "_live_analysis_active", False):
             self.engine_controller.stop()
         if clear_cards:
             self.card_cam.set_clock_text("")
@@ -587,6 +700,7 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
         self._update_history_and_graph()
         self.board._clear_annotations()
         self.board.reset_transient_state()
+        self._position_editable = True
         self.board.set_moves_enabled(True)
         self._sync_all()
         self.setWindowTitle("ColongphuongGUI - New Game")
@@ -602,11 +716,11 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
             self._on_action_save_as()
 
     def _on_action_save_as(self):
-        self._ensure_default_dir()
+        default_dir = self._ensure_default_dir()
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Record File",
-            DEFAULT_KYPHO_DIR,
+            default_dir,
             "LPGF Record (*.lpgf)",
         )
         if not file_path:
@@ -617,7 +731,8 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
         self._save_to_file(file_path)
 
     def _save_to_file(self, file_path: str):
-        self._write_record_file(file_path)
+        fmt = "lpgf20" if file_path.lower().endswith(".lpgf") else None
+        self._write_record_file(file_path, format_type=fmt)
 
 
     def _edit_picture(self, side: str):
@@ -671,11 +786,22 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
         self._update_runtime_cards()
 
     def _on_engine_info(self, info):
+        if getattr(self, "batch_analyzer", None) and self.batch_analyzer.is_running:
+            self.batch_analyzer.handle_search_info(info)
+            return
         if getattr(self, "_inspection_mode", None):
             self._inspection_info(info);return
         self.thinking_information.update_info(info)
+        if hasattr(self, "candidates_widget"):
+            self.candidates_widget.update_info(info, self.game)
+        if info.multipv == 1 and info.score is not None:
+            cam_score = info.score if (info.root_side == 'CAM' or info.score_perspective == 'CAM') else -info.score
+            best_line = ' '.join(info.pv or [])
+            self.win_percentage.set_score(cam_score, 'CAM', best_move=best_line)
 
     def _on_engine_bestmove(self, move, canonical_text: str):
+        if getattr(self, "batch_analyzer", None) and self.batch_analyzer.is_running:
+            return
         if getattr(self, "_inspection_mode", None):
             self._inspection_bestmove(move, canonical_text);return
         self._engine_bestmove_text = canonical_text
@@ -704,6 +830,38 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
             or self.game.current_node is not self._engine_expected_node
         )
         if stale:
+            self.statusBar().showMessage("Ignored stale engine response", 3000)
+            return
+
+        min_ms = self._effective_min_engine_time_ms(expected_player)
+        elapsed_ms = 0.0
+        if self._engine_search_started_monotonic is not None:
+            elapsed_ms = (time.monotonic() - self._engine_search_started_monotonic) * 1000.0
+        wait_ms = int(min_ms - elapsed_ms) if min_ms > elapsed_ms else 0
+
+        gen = self._engine_expected_generation
+        node = self._engine_expected_node
+        if wait_ms > 15:
+            self._pending_delayed_engine_move = (gen, expected_player, node, move, canonical_text)
+            self.statusBar().showMessage(f"{expected_player.name} waiting min think time…", wait_ms + 500)
+            QTimer.singleShot(
+                wait_ms,
+                lambda g=gen, p=expected_player, n=node, m=move, t=canonical_text: self._apply_engine_play_bestmove(g, p, n, m, t),
+            )
+            return
+
+        self._apply_engine_play_bestmove(gen, expected_player, node, move, canonical_text)
+
+    def _apply_engine_play_bestmove(self, expected_generation, expected_player, expected_node, move, canonical_text: str):
+        self._pending_delayed_engine_move = None
+        if self._closing or not self.is_game_active:
+            return
+        if (
+            expected_generation != self._match_generation
+            or expected_player is None
+            or self.game.current != expected_player
+            or self.game.current_node is not expected_node
+        ):
             self.statusBar().showMessage("Ignored stale engine response", 3000)
             return
 
@@ -750,9 +908,16 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
             self._finish_current_game("normal")
         else:
             self._on_turn_changed()
+            self._refresh_active_game_input()
+            self._update_runtime_cards()
             self.statusBar().showMessage(f"Engine played {canonical_text}", 5000)
+            if not self.engine_controller.running:
+                self._schedule_engine_turn(50)
 
     def _on_engine_search_finished(self, _exit_code: int):
+        if getattr(self, "batch_analyzer", None) and self.batch_analyzer.is_running:
+            self.batch_analyzer.handle_ply_completed(_exit_code)
+            return
         if getattr(self, "_inspection_mode", None):
             self._inspection_finished(_exit_code);return
         mode = self._engine_mode
@@ -768,6 +933,8 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
                 )
             return
 
+        if self._pending_delayed_engine_move is not None:
+            return
         self._refresh_active_game_input()
         self._update_runtime_cards()
         if played and self.is_game_active and not self.game.is_over():
@@ -815,10 +982,45 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
         dialog = GameSettingsDialog(self, allow_start=False)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.game_setup_config = dialog.game_config()
+            self._sync_go_back_button()
             self.statusBar().showMessage("Game settings saved", 5000)
 
     def _open_consider_settings(self):
         ConsiderSettingsDialog(self).exec()
+
+    def _open_batch_analysis(self):
+        if self.is_game_active:
+            self.statusBar().showMessage("Hãy dừng ván đấu trước khi phân tích toàn bộ kỳ phổ.", 4000)
+            return
+        from engine import registry
+        engines = [e.get('name', e.get('id', '')) for e in registry.load() if registry.playable(e)]
+        if not engines:
+            QMessageBox.warning(self, "Chưa có Engine", "Không tìm thấy Engine nào khả dụng để phân tích kỳ phổ.\nHãy kiểm tra Tools → Engine settings.")
+            return
+        cur_engine = self.thinking_information.engine_combo.currentText()
+        total_plies = len(self.history_nodes)
+        cur_ply = 0
+        if self.game.current_node in self.history_nodes:
+            cur_ply = self.history_nodes.index(self.game.current_node)
+
+        from gui.batch_analysis import BatchAnalysisDialog, BatchGameAnalyzer
+        dlg = BatchAnalysisDialog(self, engines, cur_engine, total_plies, cur_ply)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            settings = dlg.get_settings()
+            start_ply = settings['start_ply']
+            nodes_to_run = self.history_nodes[start_ply:]
+            if not hasattr(self, 'batch_analyzer') or self.batch_analyzer is None:
+                self.batch_analyzer = BatchGameAnalyzer(self)
+                self.batch_analyzer.finished.connect(self._on_batch_analysis_finished)
+            self.batch_analyzer.start(
+                nodes_to_run,
+                time_per_move_sec=settings['time_per_move_sec'],
+                max_total_min=settings['max_total_min'],
+            )
+
+    def _on_batch_analysis_finished(self, success: bool, message: str):
+        self.statusBar().showMessage(message, 8000)
+        QMessageBox.information(self, "Phân tích kỳ phổ", message)
 
     def _open_hint_settings(self):
         HintSettingsDialog(self).exec()
@@ -872,6 +1074,7 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
 
         self.board._clear_annotations()
         self.board.reset_transient_state(clear_last_move=True)
+        self._position_editable = True
         self.board.set_moves_enabled(True)
 
         self.notation_view.rebuild_tree(
@@ -895,6 +1098,7 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
             return
 
         self.game_setup_config = dialog.game_config()
+        self._sync_go_back_button()
         if not dialog.start_requested:
             self.statusBar().showMessage("Game settings saved", 5000)
             return
@@ -915,8 +1119,10 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
         self._document_dirty = True
         self.current_file_path = None
         self.is_game_active = True
+        self.board.allow_analysis_after_result = False
         self.board._clear_annotations()
         self.board.reset_transient_state(clear_last_move=True)
+        self._position_editable = True
         self.board.set_moves_enabled(True)
 
         cam_controller = str(self.game_setup_config.get("cam_controller", "Human"))
@@ -949,10 +1155,13 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
     def _on_stop_game(self):
         if self.is_game_active or self.engine_controller.running:
             self._stop_match_runtime(clear_cards=False)
-            self.board.set_moves_enabled(False)
+            self._position_editable = True
+            self.board.allow_analysis_after_result = True
+            self.board.set_moves_enabled(not self.game.is_board_terminal())
             self.card_cam.set_runtime_status("Stopped")
             self.card_xanh.set_runtime_status("Stopped")
             self._update_menu_states()
+            self._sync_go_back_button()
             self._autosave_current_game(final=True)
             QMessageBox.information(self, "Stop", "Match stopped.")
 
@@ -983,8 +1192,9 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
         # Keep the board, both komadai and the action toolbar in one
         # centered, resize-coupled cluster rather than stretching BoardCanvas
         # independently between fixed-width side panels.
-        self.board_row_widget = QWidget()
+        self.board_row_widget = _BoardClusterHost()
         self.board_row = QHBoxLayout(self.board_row_widget)
+        self.board_row.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         self.board_row.setContentsMargins(0, 0, 0, 0)
         # A compact, constant seam: komadai -> toolbar -> board -> komadai.
         self.board_row.setSpacing(6)
@@ -1014,6 +1224,7 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
         self.board.pieceSelected.connect(self.toolbar.set_piece_selected_state)
         self.board.moveMade.connect(self._on_move_made)
         self.toolbar.btn_resign.clicked.connect(self._on_resign)
+        self.toolbar.goBackClicked.connect(self._on_go_back_clicked)
         self.board.geometryUpdated.connect(self._sync_side_margins)
 
         self._arrange_side_panels(is_flipped=False)
@@ -1023,6 +1234,14 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
         self.board_row.addWidget(self.board, alignment=Qt.AlignmentFlag.AlignVCenter)
         self.board_row.addWidget(self.right_panel_widget, alignment=Qt.AlignmentFlag.AlignVCenter)
         self.board_row.addStretch(1)
+
+        self.arrow_overlay = EngineArrowOverlay(
+            self.board_row_widget, self.board, self.komadai_cam, self.komadai_xanh
+        )
+        self.board._overlay_active = True
+        self.board.engineArrowsChanged.connect(self.arrow_overlay.update)
+        self.arrow_overlay.show()
+        self.arrow_overlay.raise_()
 
         # Evaluation graph is normally compact, but must be allowed to grow
         # vertically when it lives in the lower splitter.
@@ -1034,6 +1253,16 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
         self.thinking_information = ThinkingInformationWidget()
         self.thinking_information.setMinimumHeight(95)
         self.thinking_information.setMaximumHeight(16777215)
+
+        self.candidates_widget = EngineCandidatesWidget()
+        self.candidates_widget.setMinimumHeight(95)
+        self.candidates_widget.setMaximumHeight(16777215)
+        self.candidates_widget.moveDoubleClicked.connect(self._on_suggested_move_played)
+
+        self.possible_moves_widget = PossibleMovesWidget()
+        self.possible_moves_widget.setMinimumHeight(95)
+        self.possible_moves_widget.setMaximumHeight(16777215)
+        self.possible_moves_widget.moveDoubleClicked.connect(self._on_suggested_move_played)
 
         # ----------------------------------------------------
         # NOTATION AREA
@@ -1053,16 +1282,6 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
         notation_col.addWidget(self.stack_inspector)
         notation_col.addWidget(self.notation_view, stretch=1)
         self.board.cellInspected.connect(self._on_cell_inspected)
-
-        # ----------------------------------------------------
-        # TOP-LEFT: Winning percentage + board/komadai
-        # ----------------------------------------------------
-        self.top_left_container = QWidget()
-        self.top_left_layout = QVBoxLayout(self.top_left_container)
-        self.top_left_layout.setContentsMargins(0, 0, 0, 0)
-        self.top_left_layout.setSpacing(8)
-        self.top_left_layout.addWidget(self.win_percentage)
-        self.top_left_layout.addWidget(self.board_row_widget, 1)
 
         self._setup_docks()
         self._schedule_cluster_update()
@@ -1125,6 +1344,12 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
         self.graph_view.score_label = ('CAM cp — live current position; other points stored' if live else 'CAM cp — stored results (gaps = N/A)') if any(v is not None for v in scores) else 'CAM cp — no engine data'
         self.graph_view.set_scores(scores, current_idx=current_idx)
 
+        # Synchronize winning percentage bar for the selected move
+        if self.game.current_node in evaluations:
+            self.win_percentage.set_score(evaluations[self.game.current_node][1], 'CAM')
+        elif not getattr(self, '_inspection_mode', None):
+            self.win_percentage.reset()
+
     def _on_graph_move_selected(self, move_idx: int):
         if 0 <= move_idx < len(self.history_nodes):
             target_node = self.history_nodes[move_idx]
@@ -1177,9 +1402,6 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
         # keep enough room for its existing 180px card without overlapping.
         card_width = 180 if not (self.card_cam.isHidden() and self.card_xanh.isHidden()) else 0
         toolbar_on = self.board.show_toolbar
-        # Respect the approved cluster's smallest complete size inside its dock.
-        min_board, _, min_side = self._cluster_dimensions(28, toolbar=toolbar_on, card_width=card_width)
-        self.top_left_container.setMinimumWidth(min_board + 2 * min_side + 4 * self.board_row.spacing() + 8)
         row_spacing = self.board_row.spacing()
         # The two stretch spacers use no width; there are four QHBox gaps.
         target_cell = 28
@@ -1205,6 +1427,10 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
         self.komadai_cam.set_scale(actual_cell)
         self.komadai_xanh.set_scale(actual_cell)
         self._sync_side_margins()
+        if hasattr(self, 'arrow_overlay') and self.arrow_overlay:
+            self.arrow_overlay.setGeometry(self.board_row_widget.rect())
+            self.arrow_overlay.raise_()
+            self.arrow_overlay.update()
 
     def eventFilter(self, watched, event):
         if (any(watched is getattr(self, name, None) for name in ('board_row_widget', 'card_cam', 'card_xanh'))
@@ -1306,6 +1532,9 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
 
         self._sync_side_margins()
         self.board.update()
+        if hasattr(self, "possible_moves_widget"):
+            self.possible_moves_widget.update_moves(self.game)
+        self._sync_go_back_button()
         self._schedule_cluster_update()
         self._inspection_position_changed()
         self._review_position_changed()
@@ -1314,7 +1543,7 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
     def _on_move_made(self, move):
         self._tree_undo.clear()
         self._document_dirty = True
-        if self.engine_controller.running:
+        if self.engine_controller.running and not getattr(self, "_live_analysis_active", False):
             self._engine_mode = "idle"
             self._engine_expected_generation = None
             self._engine_expected_player = None
@@ -1347,16 +1576,134 @@ class MainWindow(ReviewActions, TreeActions, ConsiderActions, AnalysisActions, M
             return
         if self.engine_controller.running:
             self.engine_controller.stop()
-        # Preserve an explicit Stop/pause while navigating the history tree.
-        was_moves_enabled = self.board.moves_enabled
+        # Preserve an explicit Stop/pause while navigating the history tree,
+        # without permanently locking moves after visiting a terminal node.
+        allow_if_ongoing = self.board.moves_enabled or getattr(self, "_position_editable", False) or (not self.is_game_active)
+        if getattr(self, "_review_active", False):
+            allow_if_ongoing = False
         self.game.go_to_node(node)
         self.notation_view.set_current_node(node)
         self.board.reset_transient_state(clear_last_move=True)
         self.board._clear_annotations()
-        self.board.set_moves_enabled(was_moves_enabled and not self.game.is_over())
+        self.board.allow_analysis_after_result = not self.is_game_active
+        self.board.set_moves_enabled(bool(allow_if_ongoing) and not self.game.is_board_terminal())
         self._update_history_and_graph()
         self._update_menu_states()
         self._sync_all()
+
+    def _on_toggle_engine_arrows(self, checked: bool):
+        self.show_arrows = bool(checked)
+        if hasattr(self, "board"):
+            self.board.set_show_engine_arrows(bool(checked))
+        settings = registry.settings()
+        settings.setValue("analysis/show_arrows", bool(checked))
+        settings.sync()
+
+    def _on_suggested_move_played(self, move_or_str):
+        if getattr(self, "_review_active", False):
+            return
+        if self.is_game_active and (self.engine_controller.running or not self._controller_is_human(self.game.current)):
+            return
+        allow_nonterm = not self.is_game_active
+        if allow_nonterm and self.game.is_board_terminal():
+            return
+        if not allow_nonterm and self.game.is_over():
+            return
+
+        legal = self.game.legal_moves(allow_nonterminal_analysis=allow_nonterm)
+        target_mv = None
+        if isinstance(move_or_str, str):
+            text = move_or_str.strip()
+            target_mv = next((m for m in legal if m.notation(self.game.board) == text), None)
+        else:
+            target_mv = next((m for m in legal if self._same_move(m, move_or_str)), None)
+        if target_mv is None:
+            return
+        if self.is_game_active and self._consume_clock_elapsed(self.game.current):
+            return
+        if not self.game.commit_prevalidated_move(
+            target_mv,
+            allow_nonterminal_analysis=allow_nonterm,
+        ):
+            return
+        self.board.last_move = target_mv
+        self.board.reset_transient_state(clear_last_move=False)
+        self.board._clear_annotations()
+        self._on_move_made(target_mv)
+
+    def _sync_go_back_button(self):
+        if not hasattr(self, "toolbar") or not hasattr(self.toolbar, "set_go_back_visible"):
+            return
+        self.toolbar.set_go_back_visible(True)
+        allow = bool(self.game_setup_config.get("allow_go_back", False))
+        has_parent = self.game.current_node is not None and self.game.current_node.parent is not None
+        can_undo = allow and has_parent and not getattr(self, "_review_active", False)
+        if self.is_game_active and not (
+            self._controller_is_human(Player.CAM) or self._controller_is_human(Player.XANH)
+        ):
+            can_undo = False
+        self.toolbar.set_go_back_enabled(can_undo)
+        self.toolbar.update_scale(self.board.cell_size if hasattr(self, "board") else 64)
+
+    def _on_go_back_clicked(self):
+        if getattr(self, "_review_active", False):
+            return
+        if not bool(self.game_setup_config.get("allow_go_back", False)):
+            return
+        cur = self.game.current_node
+        if cur is None or cur.parent is None:
+            return
+
+        if not self.is_game_active:
+            self._on_node_selected(cur.parent)
+            return
+
+        cur_is_human = self._controller_is_human(self.game.current)
+        other_is_human = self._controller_is_human(self._other_player(self.game.current))
+        was_engine_waiting = self.engine_controller.running or (self._pending_delayed_engine_move is not None)
+        if was_engine_waiting:
+            self._invalidate_match_callbacks()
+            if self.engine_controller.running:
+                self._engine_mode = "idle"
+                self.engine_controller.stop()
+            steps = 1
+        elif cur_is_human and not other_is_human and cur.parent.parent is not None:
+            steps = 2
+        else:
+            steps = 1
+
+        target = cur
+        prune_child = None
+        for _ in range(steps):
+            if target.parent is None:
+                break
+            prune_child = target
+            target = target.parent
+
+        self.game.go_to_node(target)
+        if prune_child is not None and prune_child in target.children:
+            try:
+                target.children.remove(prune_child)
+            except ValueError:
+                pass
+
+        self._clock_last_monotonic = time.monotonic()
+        self.board.reset_transient_state(clear_last_move=True)
+        self.board._clear_annotations()
+        self.notation_view.rebuild_tree(
+            self.game.root,
+            self.game.current_node,
+            self.game.board,
+            game_result=self.game.result,
+            current_player=self.game.current,
+        )
+        self._update_history_and_graph()
+        self._refresh_active_game_input()
+        self._update_runtime_cards()
+        self._sync_all()
+        self.statusBar().showMessage("Returned to previous move.", 3000)
+        if self.is_game_active and not self._controller_is_human(self.game.current):
+            self._schedule_engine_turn(80)
 
 
     def closeEvent(self, event):

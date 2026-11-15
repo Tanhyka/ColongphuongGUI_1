@@ -30,11 +30,12 @@ TOOLBAR_BTN_STYLE = """
 
 
 class ActionToolbar(QWidget):
-    """Side toolbar containing rotation, grouping, confirmation, and resignation actions."""
+    """Side toolbar containing rotation, grouping, confirmation, resignation, and optional go-back actions."""
 
     groupStateChanged = pyqtSignal(bool)
     rotateClicked = pyqtSignal(int)
     tickClicked = pyqtSignal()
+    goBackClicked = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -49,6 +50,8 @@ class ActionToolbar(QWidget):
         self.btn_group = QPushButton()
         self.btn_tick = QPushButton()
         self.btn_resign = QPushButton()
+        self.btn_go_back = QPushButton()
+        self.btn_go_back.setToolTip("Đi lại nước trước (Go back to previous move)")
 
         self.group_icon_info: Tuple[str, str] = ("group.svg", "□")
         self.ungroup_icon_info: Tuple[str, str] = ("ungroup.svg", "▦")
@@ -59,22 +62,28 @@ class ActionToolbar(QWidget):
             (self.btn_group, self.group_icon_info[0], self.group_icon_info[1]),
             (self.btn_tick, "tick.svg", "✓"),
             (self.btn_resign, "resign.svg", "⚑"),
+            (self.btn_go_back, "go_back.svg", "↶"),
         ]
 
         for button, _, _ in self.buttons:
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             self.layout.addWidget(button)
 
-        # No trailing stretch: a fixed-height 5-button toolbar needs exactly
-        # four gaps, otherwise Qt may compress/overlap the fixed-size buttons.
+        self.btn_go_back.setVisible(True)
+        self.btn_go_back.setEnabled(False)
+
+        # No trailing stretch: a fixed-height toolbar needs exact button gaps,
+        # otherwise Qt may compress/overlap the fixed-size buttons.
 
         self.btn_group.clicked.connect(self._toggle_group_state)
         self.btn_rot_left.clicked.connect(lambda: self.rotateClicked.emit(-1))
         self.btn_rot_right.clicked.connect(lambda: self.rotateClicked.emit(1))
         self.btn_tick.clicked.connect(self.tickClicked.emit)
+        self.btn_go_back.clicked.connect(self.goBackClicked.emit)
 
         self.set_piece_selected_state(False, can_team=False, can_tick=False, can_rotate=False)
         self._button_dim = 28
+        self._last_cell_size = 54.0
         self.update_scale(54)
 
     def _create_rounded_icon(self, svg_path: str, dim: int, radius: int) -> QIcon:
@@ -124,13 +133,14 @@ class ActionToolbar(QWidget):
 
     def update_scale(self, cell_size: float):
         """Resize buttons and full layout together, preventing icon overlap."""
+        self._last_cell_size = float(cell_size)
         btn_dim = self.button_dimension(cell_size)
         spacing = self.button_spacing(cell_size)
         radius = max(3, round(btn_dim * 0.11))
         self._button_dim = btn_dim
         self.layout.setSpacing(spacing)
-        # Exactly five buttons and four gaps (no trailing spacer).
-        self.setFixedSize(btn_dim, 5 * btn_dim + 4 * spacing)
+        visible_count = max(1, sum(1 for btn, _, _ in self.buttons if not btn.isHidden()))
+        self.setFixedSize(btn_dim, visible_count * btn_dim + (visible_count - 1) * spacing)
 
         for button, filename, fallback in self.buttons:
             if button == self.btn_group:
@@ -138,6 +148,14 @@ class ActionToolbar(QWidget):
             button.setFixedSize(btn_dim, btn_dim)
             button.setIconSize(QSize(btn_dim, btn_dim))
             self._apply_style(button, filename, fallback, radius, btn_dim)
+
+    def set_go_back_visible(self, visible: bool):
+        """Shows or hides the optional go-back button and adjusts toolbar height."""
+        self.btn_go_back.setVisible(bool(visible))
+        self.update_scale(getattr(self, "_last_cell_size", 54.0))
+
+    def set_go_back_enabled(self, enabled: bool):
+        self.btn_go_back.setEnabled(bool(enabled))
 
     def _apply_style(self, button: QPushButton, filename: str, fallback: str, radius: int, dim: int):
         path = os.path.join(DIR_ICONS, filename)

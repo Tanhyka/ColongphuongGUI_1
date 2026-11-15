@@ -1,5 +1,6 @@
 """Notation tree view and game navigation component."""
 
+import re
 from typing import Optional, Dict
 from PyQt6.QtWidgets import (
     QWidget,
@@ -265,8 +266,9 @@ class NotationView(Panel):
                     first = node.parent.children[0] is node
                     visual_parent = containers[id(node.parent)] if first else parent_item
                     containers[key] = containers[id(node.parent)] if first else item
-                    label = f'{depth}. {node.notation_text or "Move"}'
-                    if not first:label = 'Variation: ' + label
+                    clean_notation = re.sub(r"\([a-i][1-9]\)$", "", node.notation_text or "Move")
+                    label = f'{depth}. {clean_notation}'
+                    if not first:label = '↳ ' + label
                     side = node.parent._snapshot_current
                 if item.parent() is not visual_parent:
                     old_parent = item.parent() or self.tree.invisibleRootItem()

@@ -30,10 +30,14 @@ def encode_game(game):
             index[id(child)]=len(queue);queue.append(child)
         board=node._snapshot_board
         if board is None:raise ValueError('History snapshot missing')
+        pos_payload=getattr(node,'_cached_base_payload',None)
+        if pos_payload is None:
+            pos_payload=_base_position_payload(board,node._snapshot_current)
+            node._cached_base_payload=pos_payload
         move=None
         if node.move:
             m=node.move;move=dict(kind=m.kind,src=m.src,dst=m.dst,ptype=m.ptype.name if m.ptype else None,facing=m.facing,rotate_after=m.rotate_after)
-        nodes.append(dict(node_id=node.node_id,glyphs=node.glyphs,metadata=node.metadata,parent=index[id(node.parent)] if node.parent else None,move=move,notation=node.notation_text,comment=node.comment,result=node.result,position=_base_position_payload(board,node._snapshot_current),snapshot_result=node._snapshot_result,counts=dict(node._snapshot_pos_counts)))
+        nodes.append(dict(node_id=node.node_id,glyphs=node.glyphs,metadata=node.metadata,parent=index[id(node.parent)] if node.parent else None,move=move,notation=node.notation_text,comment=node.comment,result=node.result,position=pos_payload,snapshot_result=node._snapshot_result,counts=dict(node._snapshot_pos_counts)))
     return dict(nodes=nodes,selected=index[id(game.current_node)],base_ply=getattr(game,'base_ply',0),max_plies=game.max_plies,extensions=game.metadata,game_id=game.game_id)
 
 def decode_game(payload):
@@ -75,7 +79,7 @@ def decode_game(payload):
 
 class SessionStore:
     def __init__(self,path=None):
-        self.directory=Path(path) if path else data_dir();self.errors=[]
+        self.directory=Path(path) if path else data_dir();self.errors=[];self._last_written=None
     def _read(self,name):
         path=self.directory/name
         if not path.exists():return None
@@ -108,13 +112,14 @@ class SessionStore:
         text=json.dumps(dict(sha256=hashlib.sha256(raw.encode()).hexdigest(),payload=data),ensure_ascii=False)
         if len(text.encode('utf8'))>64*1024*1024:raise ValueError('Snapshot exceeds 64 MiB; previous snapshot retained')
         atomic_write(self.directory/name,text)
-    def save(self,game,workspace,*,clean=False):
-        data=dict(schema=SCHEMA,clean=clean,game=encode_game(game),workspace=workspace,extensions={})
+    def save(self,game,workspace,*,clean=False,encoded_game=None):
+        data=dict(schema=SCHEMA,clean=clean,game=encoded_game if encoded_game is not None else encode_game(game),workspace=workspace,extensions={})
         # Validate before replacing either known-good file.
         decode_game(data['game'])
-        previous=self._read('session.json')
+        previous=self._last_written if self._last_written is not None else self._read('session.json')
         if previous:self._write('previous.json',previous)
         self._write('session.json',data)
+        self._last_written=data
     def interrupted(self):
         current=self._read('session.json') or self._read('previous.json')
         if current and not current['clean']:

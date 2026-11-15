@@ -71,6 +71,7 @@ class MoveNode:
         self._snapshot_current: Optional[Player] = None
         self._snapshot_result: Optional[str] = None
         self._snapshot_pos_counts: Optional[Counter] = None
+        self._cached_base_payload = None
 
     def add_child(self, move: rules.Move, notation_text: str = "") -> 'MoveNode':
         """Appends or returns an existing move child node."""
@@ -107,6 +108,7 @@ class Game:
         node._snapshot_current = self.current
         node._snapshot_result = self.result
         node._snapshot_pos_counts = Counter(self.pos_counts)
+        node._cached_base_payload = None
 
     def refresh_current_snapshot(self) -> None:
         """Refresh the cache after a non-move result change (mate marker/resign)."""
@@ -125,6 +127,11 @@ class Game:
         self.pos_counts = Counter(counts)
         self.current_node = node
         return True
+
+    def position_id(self) -> str:
+        """Returns deterministic 64-char hex SHA256 position hash."""
+        from engine.protocol import export_game, position_id
+        return position_id(export_game(self))
 
     def set_base_position(self, board: Board, player_to_move: Player = Player.CAM):
         """Install a new root position and clear all move history.
@@ -160,8 +167,19 @@ class Game:
         standard = _standard_initial_board()
         return _position_hash(self.base_board, self.base_current) != _position_hash(standard, Player.CAM)
 
-    def legal_moves(self) -> List[rules.Move]:
-        return [] if self.result is not None else rules.legal_moves(self.board, self.current)
+    def is_board_terminal(self) -> bool:
+        """True when the board position itself is checkmate, stalemate, or 3-fold repetition."""
+        if self.result is None:
+            return False
+        low = self.result.lower()
+        if 'chieu het' in low or 'pat' in low or '3 lan' in low:
+            return True
+        return rules.game_status(self.board, self.current) != 'ongoing'
+
+    def legal_moves(self, allow_nonterminal_analysis: bool = False) -> List[rules.Move]:
+        if self.result is not None and (not allow_nonterminal_analysis or self.is_board_terminal()):
+            return []
+        return rules.legal_moves(self.board, self.current)
 
     def in_check(self, player: Optional[Player] = None) -> bool:
         return rules.is_in_check(self.board, player or self.current)
@@ -172,6 +190,7 @@ class Game:
         notation_text: Optional[str] = None,
         *,
         check_terminal: bool = True,
+        allow_nonterminal_analysis: bool = False,
     ) -> bool:
         """Apply a move that the caller has already established is legal.
 
@@ -181,7 +200,11 @@ class Game:
         history, repetition tracking and optional terminal detection.
         """
         if self.result is not None:
-            return False
+            if not allow_nonterminal_analysis or self.is_board_terminal():
+                return False
+            # Branching a new variation from a resign/timeout/max-ply node keeps the
+            # parent node's stored result intact while starting the child fresh.
+            self.result = None
 
         if notation_text is None:
             try:
@@ -226,11 +249,17 @@ class Game:
         self._store_snapshot(self.current_node)
         return True
 
-    def make_move(self, move: rules.Move) -> bool:
+    def make_move(self, move: rules.Move, allow_nonterminal_analysis: bool = False) -> bool:
         """Executes a move, tracks position history, and checks termination conditions."""
-        if self.result is not None or not any(_same_move(move, m) for m in self.legal_moves()):
+        if self.result is not None and (not allow_nonterminal_analysis or self.is_board_terminal()):
             return False
-        return self.commit_prevalidated_move(move, check_terminal=True)
+        if not any(_same_move(move, m) for m in self.legal_moves(allow_nonterminal_analysis=allow_nonterminal_analysis)):
+            return False
+        return self.commit_prevalidated_move(
+            move,
+            check_terminal=True,
+            allow_nonterminal_analysis=allow_nonterminal_analysis,
+        )
 
     def resign(self):
         """Current player forfeits the game."""

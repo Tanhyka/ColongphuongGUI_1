@@ -22,6 +22,14 @@ DIR_PIECES = os.path.join(ASSETS_DIR, "pieces")
 DIR_BOARD = os.path.join(ASSETS_DIR, "board")
 DIR_ICONS = os.path.join(ASSETS_DIR, "icons")
 
-# Default export/import directory resolved dynamically from project root
-from engine.session import data_dir
-DEFAULT_KYPHO_DIR = str(data_dir() / "records")
+# Default export/import directory: E:\code5\CLP_dataset, falling back to ColongphuongGUI_1 project root
+CLP_DATASET_DIR = r"E:\code5\CLP_dataset"
+
+
+def get_default_kypho_dir() -> str:
+    if os.path.isdir(CLP_DATASET_DIR):
+        return CLP_DATASET_DIR
+    return PROJECT_ROOT
+
+
+DEFAULT_KYPHO_DIR = get_default_kypho_dir()

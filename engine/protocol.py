@@ -105,21 +105,52 @@ def move_from_wire(value):
     if value['facing'] is not None and (type(value['facing'])!=int or value['facing'] not in range(4)):raise ValueError('Invalid facing')
     return Move(value['kind'],square(value['src']),square(value['dst']),PieceType[value['ptype']],value['facing'],value['rotate_after'])
 
+def _wire_position_hash(value):
+    if not isinstance(value,dict) or set(value)!={'board','to_move','reserve','prisoners'}:
+        b,s=board_from_position(value);return _position_hash(b,s)
+    board_arr=value['board']
+    if not isinstance(board_arr,list) or len(board_arr)!=81:
+        b,s=board_from_position(value);return _position_hash(b,s)
+    side_name=value['to_move']
+    if side_name not in ('CAM','XANH'):
+        b,s=board_from_position(value);return _position_hash(b,s)
+    res=value['reserve'];pris=value['prisoners']
+    if not isinstance(res,dict) or not isinstance(pris,dict) or set(res)!={'CAM','XANH'} or set(pris)!={'CAM','XANH'}:
+        b,s=board_from_position(value);return _position_hash(b,s)
+    parts=[side_name]
+    for idx,st in enumerate(board_arr):
+        if st:
+            cell="".join(f"{p['owner'][0]}{p['type']}{p['facing']}" for p in st)
+            parts.append(f"{idx//9},{idx%9}:{cell}")
+    for pl_name in ('CAM','XANH'):
+        parts.append(f"R:{pl_name}={','.join(sorted(res[pl_name]))}")
+        parts.append(f"P:{pl_name}={','.join(sorted(pris[pl_name]))}")
+    return "|".join(parts)
+
+def _is_legal_move(board,side,move):
+    for m in rules.generate_moves(board,side):
+        if _same_move(m,move):
+            b2=board.clone()
+            rules.apply_move(b2,side,m)
+            return m if not rules.is_in_check(b2,side) else None
+    return None
+
 def simulation(state):
     b,s=board_from_position(state['position']);g=Game();g.set_base_position(b,s)
-    g.pos_counts=Counter({_position_hash(*board_from_position(e['position'])):e['count'] for e in state['repetition']['entries']})
+    g.pos_counts=Counter({_wire_position_hash(e['position']):e['count'] for e in state['repetition']['entries']})
     if state['result']['status']=='terminal':g.result='terminal'
     return g
 
-def apply_wire(game,value):
+def apply_wire(game,value,*,check_terminal=True):
     move=move_from_wire(value)
-    candidate=next((m for m in game.legal_moves() if _same_move(m,move)),None)
+    candidate=None if game.result is not None else _is_legal_move(game.board,game.current,move)
     if candidate is None:raise ValueError('Engine supplied illegal move/PV')
     text=candidate.notation(game.board)
-    if not game.commit_prevalidated_move(candidate,check_terminal=True):raise ValueError('Move after terminal state')
+    if not game.commit_prevalidated_move(candidate,notation_text=text,check_terminal=check_terminal):raise ValueError('Move after terminal state')
     return candidate,text
 
 def validate_info(state,value,request_id,requested):
+    if isinstance(value, dict): value.setdefault('bound', 'exact')
     fields={'schema','id','depth','nodes','time_ms','multipv','score','bound','pv'}
     if not isinstance(value,dict) or set(value)!=fields or value['schema']!='clp.info/1' or value['id']!=request_id:raise ValueError('Invalid correlated info schema')
     for name,lo,hi in [('id',1,2147483647),('depth',0,1024),('nodes',0,2**53-1),('time_ms',0,86400000),('multipv',1,requested)]:
@@ -129,11 +160,11 @@ def validate_info(state,value,request_id,requested):
     if score['kind'] not in ('cp','mate','value_milli') or abs(score['value'])>(1000 if score['kind']=='value_milli' else 1000000 if score['kind']=='mate' else 2**53-1):raise ValueError('Invalid score')
     if score['kind']=='mate' and score['value']==0 and not (state['result'].get('reason')=='checkmate'):raise ValueError('Mate zero requires checkmated terminal root')
     if value['bound'] not in ('exact','lower','upper') or not isinstance(value['pv'],list) or len(value['pv'])>256:raise ValueError('Invalid PV/bound')
-    g=simulation(state);notations=[];deadline=time.monotonic()+1.0
+    g=simulation(state);notations=[];moves=[];deadline=time.monotonic()+1.0
     for move in value['pv']:
         if time.monotonic()>deadline:raise ValueError('PV validation budget exceeded')
-        _,text=apply_wire(g,move);notations.append(text)
-    return {'info':value,'notations':notations}
+        cand,text=apply_wire(g,move,check_terminal=False);notations.append(text);moves.append(cand)
+    return {'info':value,'notations':notations,'moves':moves}
 
 @dataclass
 class EngineInfo:
@@ -143,6 +174,7 @@ class EngineInfo:
     score:int|None=None
     score_kind:str|None=None
     pv:list|None=None
+    pv_moves:list|None=None
     multipv:int=1
     engine_id:str=''
     session_id:tuple|None=None
